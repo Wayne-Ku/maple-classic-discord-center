@@ -17,12 +17,25 @@ class DiscordSendError(RuntimeError):
 
 MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
+CATEGORY_COLORS = {
+    "活動": 0x57F287,
+    "更新": 0x5865F2,
+    "重要": 0xED4245,
+    "綜合": 0x95A5A6,
+}
+DEFAULT_CATEGORY_COLOR = 0x95A5A6
 DISCORD_WEBHOOK_HOSTS = {
     "discord.com",
     "discordapp.com",
     "canary.discord.com",
     "ptb.discord.com",
 }
+
+
+def get_category_color(category: str) -> int:
+    """Return the Discord embed color for an announcement category."""
+    normalized_category = (category or "").strip()
+    return CATEGORY_COLORS.get(normalized_category, DEFAULT_CATEGORY_COLOR)
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -85,7 +98,7 @@ def send_announcement(
             {
                 "title": _truncate(announcement.title, 256),
                 "url": announcement.url,
-                "color": 0xF2A23A,
+                "color": get_category_color(announcement.category),
                 "fields": [
                     {
                         "name": _truncate("公告分類", 256),

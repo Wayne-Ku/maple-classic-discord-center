@@ -1,7 +1,7 @@
 import pytest
 import requests
 
-from discord_sender import DiscordSendError, send_announcement
+from discord_sender import DiscordSendError, get_category_color, send_announcement
 from maple_parser import Announcement
 
 WEBHOOK = "https://discord.com/api/webhooks/123456/test-token"
@@ -36,6 +36,44 @@ class FakeSession:
 
 def announcement(title="標題", category="重要", date="2026/07/23", url="https://example.com/1"):
     return Announcement("1", category, title, date, url)
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_color"),
+    [
+        ("活動", 0x57F287),
+        ("更新", 0x5865F2),
+        ("重要", 0xED4245),
+        ("綜合", 0x95A5A6),
+        ("未知分類", 0x95A5A6),
+        ("", 0x95A5A6),
+        (None, 0x95A5A6),
+        (" 活動 ", 0x57F287),
+    ],
+)
+def test_get_category_color(category, expected_color):
+    assert get_category_color(category) == expected_color
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_color"),
+    [
+        ("活動", 0x57F287),
+        ("更新", 0x5865F2),
+        ("重要", 0xED4245),
+        ("綜合", 0x95A5A6),
+        ("未知分類", 0x95A5A6),
+    ],
+)
+def test_payload_embed_color_matches_category(category, expected_color):
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(category=category),
+        user_agent="test",
+        session=session,
+    )
+    assert session.calls[0][1]["json"]["embeds"][0]["color"] == expected_color
 
 
 def test_normal_204_success_payload_and_mentions():
