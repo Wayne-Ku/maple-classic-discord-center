@@ -1,7 +1,7 @@
 import pytest
 import requests
 
-from discord_sender import DiscordSendError, get_category_color, send_announcement
+from discord_sender import DiscordSendError, get_category_color, get_category_display, send_announcement
 from maple_parser import Announcement
 
 WEBHOOK = "https://discord.com/api/webhooks/123456/test-token"
@@ -56,16 +56,31 @@ def test_get_category_color(category, expected_color):
 
 
 @pytest.mark.parametrize(
-    ("category", "expected_color"),
+    ("category", "expected_display"),
     [
-        ("活動", 0x57F287),
-        ("更新", 0x5865F2),
-        ("重要", 0xED4245),
-        ("綜合", 0x95A5A6),
-        ("未知分類", 0x95A5A6),
+        ("活動", "📅 活動"),
+        ("更新", "🔧 更新"),
+        ("重要", "🚨 重要"),
+        ("綜合", "📢 綜合"),
+        ("Unknown", "📢 Unknown"),
+        (" 活動 ", "📅 活動"),
     ],
 )
-def test_payload_embed_color_matches_category(category, expected_color):
+def test_get_category_display(category, expected_display):
+    assert get_category_display(category) == expected_display
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_color", "expected_display"),
+    [
+        ("活動", 0x57F287, "📅 活動"),
+        ("更新", 0x5865F2, "🔧 更新"),
+        ("重要", 0xED4245, "🚨 重要"),
+        ("綜合", 0x95A5A6, "📢 綜合"),
+        ("未知分類", 0x95A5A6, "📢 未知分類"),
+    ],
+)
+def test_payload_embed_category_matches_category(category, expected_color, expected_display):
     session = FakeSession([FakeResponse(204)])
     send_announcement(
         WEBHOOK,
@@ -73,7 +88,32 @@ def test_payload_embed_color_matches_category(category, expected_color):
         user_agent="test",
         session=session,
     )
-    assert session.calls[0][1]["json"]["embeds"][0]["color"] == expected_color
+    embed = session.calls[0][1]["json"]["embeds"][0]
+    assert embed["color"] == expected_color
+    assert embed["fields"][0]["value"] == expected_display
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_prefix"),
+    [
+        ("活動", "📅 "),
+        ("更新", "🔧 "),
+        ("重要", "🚨 "),
+        ("綜合", "📢 "),
+        ("Unknown", "📢 "),
+        ("", "📢 "),
+        (" 活動 ", "📅 "),
+    ],
+)
+def test_payload_embed_title_starts_with_category_icon(category, expected_prefix):
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(title="公告標題", category=category),
+        user_agent="test",
+        session=session,
+    )
+    assert session.calls[0][1]["json"]["embeds"][0]["title"] == f"{expected_prefix}公告標題"
 
 
 def test_normal_204_success_payload_and_mentions():
@@ -82,7 +122,7 @@ def test_normal_204_success_payload_and_mentions():
     payload = session.calls[0][1]["json"]
     assert "discord" not in payload["username"].lower()
     assert payload["allowed_mentions"] == {"parse": []}
-    assert payload["embeds"][0]["title"] == "標題"
+    assert payload["embeds"][0]["title"] == "🚨 標題"
     assert {field["name"] for field in payload["embeds"][0]["fields"]} == {
         "公告分類",
         "公告日期",
@@ -158,6 +198,20 @@ def test_embed_values_are_safely_truncated():
     assert all(field["name"] and len(field["name"]) <= 256 for field in embed["fields"])
     assert all(field["value"] and len(field["value"]) <= 1024 for field in embed["fields"])
     assert embed["footer"]["text"] and len(embed["footer"]["text"]) <= 2048
+
+
+def test_embed_title_truncation_preserves_category_icon():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(title="x" * 300, category="活動"),
+        user_agent="test",
+        session=session,
+    )
+    title = session.calls[0][1]["json"]["embeds"][0]["title"]
+    assert title == f"📅 {'x' * 253}…"
+    assert len(title) == 256
+    assert title.startswith("📅 ")
 
 
 def test_owned_session_is_closed(monkeypatch):
