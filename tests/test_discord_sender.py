@@ -41,14 +41,14 @@ def announcement(title="標題", category="重要", date="2026/07/23", url="http
 @pytest.mark.parametrize(
     ("category", "expected_color"),
     [
-        ("活動", 0x57F287),
-        ("更新", 0x5865F2),
-        ("重要", 0xED4245),
-        ("綜合", 0x95A5A6),
+        ("活動", 0xB53A2D),
+        ("更新", 0xD8B400),
+        ("重要", 0x2D63A8),
+        ("綜合", 0x6F6F6F),
         ("未知分類", 0x95A5A6),
         ("", 0x95A5A6),
         (None, 0x95A5A6),
-        (" 活動 ", 0x57F287),
+        (" 活動 ", 0xB53A2D),
     ],
 )
 def test_get_category_color(category, expected_color):
@@ -58,10 +58,10 @@ def test_get_category_color(category, expected_color):
 @pytest.mark.parametrize(
     ("category", "expected_color"),
     [
-        ("活動", 0x57F287),
-        ("更新", 0x5865F2),
-        ("重要", 0xED4245),
-        ("綜合", 0x95A5A6),
+        ("活動", 0xB53A2D),
+        ("更新", 0xD8B400),
+        ("重要", 0x2D63A8),
+        ("綜合", 0x6F6F6F),
         ("未知分類", 0x95A5A6),
     ],
 )
@@ -94,10 +94,10 @@ def test_get_category_display(category, expected_display):
 @pytest.mark.parametrize(
     ("category", "expected_color", "expected_display"),
     [
-        ("活動", 0x57F287, "活動"),
-        ("更新", 0x5865F2, "更新"),
-        ("重要", 0xED4245, "重要"),
-        ("綜合", 0x95A5A6, "綜合"),
+        ("活動", 0xB53A2D, "活動"),
+        ("更新", 0xD8B400, "更新"),
+        ("重要", 0x2D63A8, "重要"),
+        ("綜合", 0x6F6F6F, "綜合"),
         ("未知分類", 0x95A5A6, "未知分類"),
     ],
 )

@@ -19,10 +19,10 @@ class DiscordSendError(RuntimeError):
 MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
 CATEGORY_COLORS = {
-    "活動": 0x57F287,
-    "更新": 0x5865F2,
-    "重要": 0xED4245,
-    "綜合": 0x95A5A6,
+    "活動": 0xB53A2D,
+    "更新": 0xD8B400,
+    "重要": 0x2D63A8,
+    "綜合": 0x6F6F6F,
 }
 CATEGORY_ICONS = {
     "活動": "📅",
