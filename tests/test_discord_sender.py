@@ -56,6 +56,27 @@ def test_get_category_color(category, expected_color):
 
 
 @pytest.mark.parametrize(
+    ("category", "expected_color"),
+    [
+        ("活動", 0x57F287),
+        ("更新", 0x5865F2),
+        ("重要", 0xED4245),
+        ("綜合", 0x95A5A6),
+        ("未知分類", 0x95A5A6),
+    ],
+)
+def test_payload_embed_color_matches_category(category, expected_color):
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(category=category),
+        user_agent="test",
+        session=session,
+    )
+    assert session.calls[0][1]["json"]["embeds"][0]["color"] == expected_color
+
+
+@pytest.mark.parametrize(
     ("category", "expected_display"),
     [
         ("活動", "📅 活動"),
