@@ -23,7 +23,14 @@ CATEGORY_COLORS = {
     "重要": 0xED4245,
     "綜合": 0x95A5A6,
 }
+CATEGORY_ICONS = {
+    "活動": "📅",
+    "更新": "🔧",
+    "重要": "🚨",
+    "綜合": "📢",
+}
 DEFAULT_CATEGORY_COLOR = 0x95A5A6
+DEFAULT_CATEGORY_ICON = "📢"
 DISCORD_WEBHOOK_HOSTS = {
     "discord.com",
     "discordapp.com",
@@ -32,10 +39,27 @@ DISCORD_WEBHOOK_HOSTS = {
 }
 
 
-def get_category_color(category: str) -> int:
+def _normalize_category(category: str | None) -> str:
+    """Return a category in its canonical form for display and lookup."""
+    return (category or "").strip()
+
+
+def get_category_color(category: str | None) -> int:
     """Return the Discord embed color for an announcement category."""
-    normalized_category = (category or "").strip()
-    return CATEGORY_COLORS.get(normalized_category, DEFAULT_CATEGORY_COLOR)
+    return CATEGORY_COLORS.get(_normalize_category(category), DEFAULT_CATEGORY_COLOR)
+
+
+def get_category_icon(category: str | None) -> str:
+    """Return the icon for an announcement category."""
+    return CATEGORY_ICONS.get(_normalize_category(category), DEFAULT_CATEGORY_ICON)
+
+
+def get_category_display(category: str | None) -> str:
+    """Return the category label prefixed with its Discord-friendly icon."""
+    normalized_category = _normalize_category(category)
+    if not normalized_category:
+        return get_category_icon(category)
+    return f"{get_category_icon(category)} {normalized_category}"
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -45,6 +69,12 @@ def _truncate(value: object, limit: int) -> str:
     if limit == 1:
         return "…"
     return f"{text[: limit - 1]}…"
+
+
+def get_embed_title(category: str | None, title: object) -> str:
+    """Return an icon-prefixed embed title within Discord's 256-character limit."""
+    prefix = f"{get_category_icon(category)} "
+    return f"{prefix}{_truncate(title, 256 - len(prefix))}"
 
 
 def _validate_webhook_url(webhook_url: str) -> None:
@@ -96,13 +126,13 @@ def send_announcement(
         "username": "Maple Classic Bot",
         "embeds": [
             {
-                "title": _truncate(announcement.title, 256),
+                "title": get_embed_title(announcement.category, announcement.title),
                 "url": announcement.url,
                 "color": get_category_color(announcement.category),
                 "fields": [
                     {
                         "name": _truncate("公告分類", 256),
-                        "value": _truncate(announcement.category, 1024),
+                        "value": _truncate(get_category_display(announcement.category), 1024),
                         "inline": True,
                     },
                     {
