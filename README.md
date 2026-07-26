@@ -56,9 +56,14 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/你的資料
 TEST_MODE=false
 STATE_FILE=data/state.json
 REQUEST_TIMEOUT=15
+MAPLE_THUMBNAIL_URL=
 ```
 
-`.env` 與執行時狀態檔都已被 `.gitignore` 排除。請勿提交真正的 Webhook URL。
+`MAPLE_THUMBNAIL_URL` 為可選設定，必須是 HTTPS 圖片網址；未設定時 Embed 不顯示縮圖。建議使用自行控制或穩定託管的圖片網址。`.env` 與執行時狀態檔都已被 `.gitignore` 排除，請勿提交 `.env`、真正的 Webhook URL 或其他 Secret。
+
+## Discord Embed 顯示
+
+每則公告 Embed 會顯示分類、日期、公告編號與官方公告連結；分類保留既有的顏色與 Icon，標題也保留分類 Icon。設定 `MAPLE_THUMBNAIL_URL` 時，該圖片會同時顯示為 author、縮圖與 footer 圖示。
 
 ## 測試 Discord Webhook
 

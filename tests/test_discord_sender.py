@@ -94,11 +94,11 @@ def test_get_category_display(category, expected_display):
 @pytest.mark.parametrize(
     ("category", "expected_color", "expected_display"),
     [
-        ("活動", 0x57F287, "📅 活動"),
-        ("更新", 0x5865F2, "🔧 更新"),
-        ("重要", 0xED4245, "🚨 重要"),
-        ("綜合", 0x95A5A6, "📢 綜合"),
-        ("未知分類", 0x95A5A6, "📢 未知分類"),
+        ("活動", 0x57F287, "活動"),
+        ("更新", 0x5865F2, "更新"),
+        ("重要", 0xED4245, "重要"),
+        ("綜合", 0x95A5A6, "綜合"),
+        ("未知分類", 0x95A5A6, "未知分類"),
     ],
 )
 def test_payload_embed_category_matches_category(category, expected_color, expected_display):
@@ -144,12 +144,54 @@ def test_normal_204_success_payload_and_mentions():
     assert "discord" not in payload["username"].lower()
     assert payload["allowed_mentions"] == {"parse": []}
     assert payload["embeds"][0]["title"] == "🚨 標題"
-    assert {field["name"] for field in payload["embeds"][0]["fields"]} == {
-        "公告分類",
-        "公告日期",
-        "官方公告連結",
+    embed = payload["embeds"][0]
+    assert {field["name"] for field in embed["fields"]} == {
+        "🏷️ 公告分類",
+        "📅 公告日期",
+        "🌐 官方公告",
     }
+    assert embed["author"] == {"name": "新楓之谷：經典版官方消息"}
+    assert embed["footer"] == {
+        "text": "Maple Classic Discord Center\n羽田製作｜非官方社群工具｜公告 ID：1"
+    }
+    assert "thumbnail" not in embed
+    assert "🆔 公告編號" not in {field["name"] for field in embed["fields"]}
     assert session.closed is False
+
+
+def test_thumbnail_url_adds_embed_author_and_footer_icons():
+    session = FakeSession([FakeResponse(204)])
+    thumbnail_url = "https://cdn.example.com/maple-logo"
+
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        thumbnail_url=thumbnail_url,
+        session=session,
+    )
+
+    embed = session.calls[0][1]["json"]["embeds"][0]
+    assert embed["thumbnail"] == {"url": thumbnail_url}
+    assert embed["author"]["icon_url"] == thumbnail_url
+    assert embed["footer"]["icon_url"] == thumbnail_url
+
+
+@pytest.mark.parametrize(
+    "thumbnail_url",
+    ["http://cdn.example.com/logo", "https:///logo", "javascript:alert(1)"],
+)
+def test_invalid_thumbnail_url_is_rejected_without_leaking_url(thumbnail_url):
+    with pytest.raises(DiscordSendError) as error:
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            thumbnail_url=thumbnail_url,
+            session=FakeSession([]),
+        )
+
+    assert thumbnail_url not in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -216,6 +258,7 @@ def test_embed_values_are_safely_truncated():
     )
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert len(embed["title"]) == 256
+    assert len(embed["author"]["name"]) <= 256
     assert all(field["name"] and len(field["name"]) <= 256 for field in embed["fields"])
     assert all(field["value"] and len(field["value"]) <= 1024 for field in embed["fields"])
     assert embed["footer"]["text"] and len(embed["footer"]["text"]) <= 2048

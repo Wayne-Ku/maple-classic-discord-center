@@ -11,6 +11,14 @@ def make_config(path: Path, test_mode: bool = False) -> Config:
     return Config("https://discord.invalid/webhook", test_mode, path, 5, "test")
 
 
+def make_config_with_thumbnail(
+    path: Path, test_mode: bool = False, thumbnail_url: str | None = None
+) -> Config:
+    return Config(
+        "https://discord.invalid/webhook", test_mode, path, 5, "test", thumbnail_url
+    )
+
+
 def test_first_normal_run_only_creates_baseline(monkeypatch, tmp_path):
     items = [Announcement("2", "活動", "新", "2026/02/02", "https://x/2")]
     monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
@@ -67,6 +75,35 @@ def test_first_test_mode_sends_latest_and_creates_baseline(monkeypatch, tmp_path
     assert app.run(make_config(path, test_mode=True)) == 0
     assert [item.announcement_id for item in sent] == ["2"]
     assert load_sent_ids(path) == {"1", "2"}
+
+
+def test_test_mode_passes_thumbnail_url(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+
+    assert app.run(
+        make_config_with_thumbnail(path, test_mode=True, thumbnail_url="https://cdn.example.com/logo")
+    ) == 0
+    assert calls == [{"timeout": 5, "user_agent": "test", "thumbnail_url": "https://cdn.example.com/logo"}]
+
+
+def test_normal_mode_passes_none_thumbnail_url(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"version": 1, "sent_announcement_ids": ["1"]}', encoding="utf-8")
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+
+    assert app.run(make_config_with_thumbnail(path)) == 0
+    assert calls == [{"timeout": 5, "user_agent": "test", "thumbnail_url": None}]
 
 
 def test_no_new_announcements_does_not_send_or_write(monkeypatch, tmp_path):
