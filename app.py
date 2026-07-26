@@ -33,6 +33,8 @@ def run(config: Config) -> int:
             latest,
             timeout=config.request_timeout,
             user_agent=config.user_agent,
+            thumbnail_url=config.maple_thumbnail_url,
+            spacer_emoji=config.discord_spacer_emoji,
         )
         save_sent_ids(config.state_file, current_ids)
         LOGGER.info("測試公告發送成功，已建立目前公告基準。")
@@ -46,6 +48,8 @@ def run(config: Config) -> int:
             latest,
             timeout=config.request_timeout,
             user_agent=config.user_agent,
+            thumbnail_url=config.maple_thumbnail_url,
+            spacer_emoji=config.discord_spacer_emoji,
         )
         LOGGER.info("測試公告發送成功；既有狀態不變。")
         return 0
@@ -63,6 +67,8 @@ def run(config: Config) -> int:
             item,
             timeout=config.request_timeout,
             user_agent=config.user_agent,
+            thumbnail_url=config.maple_thumbnail_url,
+            spacer_emoji=config.discord_spacer_emoji,
         )
         sent_ids.add(item.announcement_id)
         save_sent_ids(config.state_file, sent_ids)

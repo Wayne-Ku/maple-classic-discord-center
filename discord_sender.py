@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from config import validate_discord_spacer_emoji, validate_https_image_url
 from maple_parser import Announcement
 
 
@@ -18,10 +19,10 @@ class DiscordSendError(RuntimeError):
 MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
 CATEGORY_COLORS = {
-    "活動": 0x57F287,
-    "更新": 0x5865F2,
-    "重要": 0xED4245,
-    "綜合": 0x95A5A6,
+    "活動": 0xB53A2D,
+    "更新": 0xD8B400,
+    "重要": 0x2D63A8,
+    "綜合": 0x6F6F6F,
 }
 CATEGORY_ICONS = {
     "活動": "📅",
@@ -115,40 +116,50 @@ def send_announcement(
     *,
     timeout: float = 15,
     user_agent: str,
+    thumbnail_url: str | None = None,
+    spacer_emoji: str | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     if not webhook_url:
         raise DiscordSendError("缺少 DISCORD_WEBHOOK_URL，無法發送公告。")
     _validate_webhook_url(webhook_url)
+    try:
+        thumbnail_url = validate_https_image_url(thumbnail_url)
+    except ValueError as exc:
+        raise DiscordSendError(str(exc)) from exc
+    try:
+        validate_discord_spacer_emoji(spacer_emoji)
+    except ValueError as exc:
+        raise DiscordSendError(str(exc)) from exc
+
+    description = _truncate(
+        f"🏷️ 公告分類：{_normalize_category(announcement.category)}　　"
+        f"📅 公告日期：{announcement.date}\n\n",
+        4096,
+    )
+    embed = {
+        "author": {"name": _truncate("新楓之谷：經典版官方消息", 256)},
+        "title": get_embed_title(announcement.category, announcement.title),
+        "url": announcement.url,
+        "color": get_category_color(announcement.category),
+        "description": description,
+        "footer": {
+            "text": _truncate(
+                "Maple Classic Discord Center｜羽田製作\n"
+                f"公告 ID：{announcement.announcement_id}",
+                2048,
+            )
+        },
+    }
+    if thumbnail_url:
+        embed["thumbnail"] = {"url": thumbnail_url}
+        embed["author"]["icon_url"] = thumbnail_url
+        embed["footer"]["icon_url"] = thumbnail_url
 
     payload = {
         "username": "Maple Classic Bot",
-        "embeds": [
-            {
-                "title": get_embed_title(announcement.category, announcement.title),
-                "url": announcement.url,
-                "color": get_category_color(announcement.category),
-                "fields": [
-                    {
-                        "name": _truncate("公告分類", 256),
-                        "value": _truncate(get_category_display(announcement.category), 1024),
-                        "inline": True,
-                    },
-                    {
-                        "name": _truncate("公告日期", 256),
-                        "value": _truncate(announcement.date, 1024),
-                        "inline": True,
-                    },
-                    {
-                        "name": _truncate("官方公告連結", 256),
-                        "value": _truncate(f"[前往官網查看]({announcement.url})", 1024),
-                        "inline": False,
-                    },
-                ],
-                "footer": {"text": _truncate("新楓之谷：經典版官方公告", 2048)},
-            }
-        ],
+        "embeds": [embed],
         "allowed_mentions": {"parse": []},
     }
     client = session or requests.Session()

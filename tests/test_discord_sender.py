@@ -41,14 +41,14 @@ def announcement(title="標題", category="重要", date="2026/07/23", url="http
 @pytest.mark.parametrize(
     ("category", "expected_color"),
     [
-        ("活動", 0x57F287),
-        ("更新", 0x5865F2),
-        ("重要", 0xED4245),
-        ("綜合", 0x95A5A6),
+        ("活動", 0xB53A2D),
+        ("更新", 0xD8B400),
+        ("重要", 0x2D63A8),
+        ("綜合", 0x6F6F6F),
         ("未知分類", 0x95A5A6),
         ("", 0x95A5A6),
         (None, 0x95A5A6),
-        (" 活動 ", 0x57F287),
+        (" 活動 ", 0xB53A2D),
     ],
 )
 def test_get_category_color(category, expected_color):
@@ -58,10 +58,10 @@ def test_get_category_color(category, expected_color):
 @pytest.mark.parametrize(
     ("category", "expected_color"),
     [
-        ("活動", 0x57F287),
-        ("更新", 0x5865F2),
-        ("重要", 0xED4245),
-        ("綜合", 0x95A5A6),
+        ("活動", 0xB53A2D),
+        ("更新", 0xD8B400),
+        ("重要", 0x2D63A8),
+        ("綜合", 0x6F6F6F),
         ("未知分類", 0x95A5A6),
     ],
 )
@@ -94,11 +94,11 @@ def test_get_category_display(category, expected_display):
 @pytest.mark.parametrize(
     ("category", "expected_color", "expected_display"),
     [
-        ("活動", 0x57F287, "📅 活動"),
-        ("更新", 0x5865F2, "🔧 更新"),
-        ("重要", 0xED4245, "🚨 重要"),
-        ("綜合", 0x95A5A6, "📢 綜合"),
-        ("未知分類", 0x95A5A6, "📢 未知分類"),
+        ("活動", 0xB53A2D, "活動"),
+        ("更新", 0xD8B400, "更新"),
+        ("重要", 0x2D63A8, "重要"),
+        ("綜合", 0x6F6F6F, "綜合"),
+        ("未知分類", 0x95A5A6, "未知分類"),
     ],
 )
 def test_payload_embed_category_matches_category(category, expected_color, expected_display):
@@ -111,7 +111,7 @@ def test_payload_embed_category_matches_category(category, expected_color, expec
     )
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert embed["color"] == expected_color
-    assert embed["fields"][0]["value"] == expected_display
+    assert f"公告分類：{expected_display}" in embed["description"]
 
 
 @pytest.mark.parametrize(
@@ -144,12 +144,74 @@ def test_normal_204_success_payload_and_mentions():
     assert "discord" not in payload["username"].lower()
     assert payload["allowed_mentions"] == {"parse": []}
     assert payload["embeds"][0]["title"] == "🚨 標題"
-    assert {field["name"] for field in payload["embeds"][0]["fields"]} == {
-        "公告分類",
-        "公告日期",
-        "官方公告連結",
+    embed = payload["embeds"][0]
+    assert "fields" not in embed
+    assert embed["description"] == "🏷️ 公告分類：重要　　📅 公告日期：2026/07/23\n\n"
+    assert "公告分類：" in embed["description"]
+    assert "公告日期：" in embed["description"]
+    assert "官方公告" not in embed["description"]
+    assert "公告編號" not in embed["description"]
+    assert embed["author"] == {"name": "新楓之谷：經典版官方消息"}
+    assert embed["footer"] == {
+        "text": "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
     }
+    assert "thumbnail" not in embed
     assert session.closed is False
+
+
+def test_spacer_emoji_is_not_used_in_description_layout():
+    session = FakeSession([FakeResponse(204)])
+    emoji = "<:blank:123456789012345678>"
+
+    send_announcement(
+        WEBHOOK,
+        announcement(category="活動"),
+        user_agent="test",
+        spacer_emoji=emoji,
+        session=session,
+    )
+
+    embed = session.calls[0][1]["json"]["embeds"][0]
+    assert "fields" not in embed
+    assert embed["description"] == "🏷️ 公告分類：活動　　📅 公告日期：2026/07/23\n\n"
+    assert emoji not in embed["description"]
+    assert embed["url"] == "https://example.com/1"
+    assert embed["footer"]["text"] == "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
+
+
+def test_thumbnail_url_adds_embed_author_and_footer_icons():
+    session = FakeSession([FakeResponse(204)])
+    thumbnail_url = "https://cdn.example.com/maple-logo"
+
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        thumbnail_url=thumbnail_url,
+        session=session,
+    )
+
+    embed = session.calls[0][1]["json"]["embeds"][0]
+    assert embed["thumbnail"] == {"url": thumbnail_url}
+    assert embed["author"]["icon_url"] == thumbnail_url
+    assert embed["footer"]["icon_url"] == thumbnail_url
+
+
+@pytest.mark.parametrize(
+    "thumbnail_url",
+    ["http://cdn.example.com/logo", "https:///logo", "javascript:alert(1)"],
+)
+def test_invalid_thumbnail_url_is_rejected_without_leaking_url(thumbnail_url):
+    with pytest.raises(DiscordSendError) as error:
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            thumbnail_url=thumbnail_url,
+            session=FakeSession([]),
+        )
+
+    assert thumbnail_url not in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -216,8 +278,9 @@ def test_embed_values_are_safely_truncated():
     )
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert len(embed["title"]) == 256
-    assert all(field["name"] and len(field["name"]) <= 256 for field in embed["fields"])
-    assert all(field["value"] and len(field["value"]) <= 1024 for field in embed["fields"])
+    assert len(embed["author"]["name"]) <= 256
+    assert "fields" not in embed
+    assert embed["description"] and len(embed["description"]) <= 4096
     assert embed["footer"]["text"] and len(embed["footer"]["text"]) <= 2048
 
 
