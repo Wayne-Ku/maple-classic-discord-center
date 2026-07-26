@@ -146,7 +146,7 @@ def test_normal_204_success_payload_and_mentions():
     assert payload["embeds"][0]["title"] == "🚨 標題"
     embed = payload["embeds"][0]
     assert "fields" not in embed
-    assert embed["description"] == "🏷️ 公告分類：重要     📅 公告日期：2026/07/23\n\n"
+    assert embed["description"] == "🏷️ 公告分類：重要　　📅 公告日期：2026/07/23\n\n"
     assert "公告分類：" in embed["description"]
     assert "公告日期：" in embed["description"]
     assert "官方公告" not in embed["description"]
@@ -173,7 +173,7 @@ def test_spacer_emoji_is_not_used_in_description_layout():
 
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert "fields" not in embed
-    assert embed["description"] == "🏷️ 公告分類：活動     📅 公告日期：2026/07/23\n\n"
+    assert embed["description"] == "🏷️ 公告分類：活動　　📅 公告日期：2026/07/23\n\n"
     assert emoji not in embed["description"]
     assert embed["url"] == "https://example.com/1"
     assert embed["footer"]["text"] == "Maple Classic Discord Center｜羽田製作\n公告 ID：1"

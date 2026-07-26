@@ -134,7 +134,7 @@ def send_announcement(
         raise DiscordSendError(str(exc)) from exc
 
     description = _truncate(
-        f"🏷️ 公告分類：{_normalize_category(announcement.category)}     "
+        f"🏷️ 公告分類：{_normalize_category(announcement.category)}　　"
         f"📅 公告日期：{announcement.date}\n\n",
         4096,
     )
