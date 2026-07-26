@@ -144,16 +144,11 @@ def send_announcement(
                 "value": _truncate(announcement.date, 1024),
                 "inline": True,
             },
-            {
-                "name": _truncate("🌐 官方公告", 256),
-                "value": _truncate(f"[前往官網查看]({announcement.url})", 1024),
-                "inline": False,
-            },
         ],
         "footer": {
             "text": _truncate(
-                "Maple Classic Discord Center\n"
-                f"羽田製作｜非官方社群工具｜公告 ID：{announcement.announcement_id}",
+                "Maple Classic Discord Center｜羽田製作\n"
+                f"公告 ID：{announcement.announcement_id}",
                 2048,
             )
         },

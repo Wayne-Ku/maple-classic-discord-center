@@ -145,17 +145,19 @@ def test_normal_204_success_payload_and_mentions():
     assert payload["allowed_mentions"] == {"parse": []}
     assert payload["embeds"][0]["title"] == "🚨 標題"
     embed = payload["embeds"][0]
-    assert {field["name"] for field in embed["fields"]} == {
+    assert [field["name"] for field in embed["fields"]] == [
         "🏷️ 公告分類",
         "📅 公告日期",
-        "🌐 官方公告",
-    }
+    ]
+    assert [field["value"] for field in embed["fields"]] == ["重要", "2026/07/23"]
+    assert all(field["inline"] is True for field in embed["fields"])
     assert embed["author"] == {"name": "新楓之谷：經典版官方消息"}
     assert embed["footer"] == {
-        "text": "Maple Classic Discord Center\n羽田製作｜非官方社群工具｜公告 ID：1"
+        "text": "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
     }
     assert "thumbnail" not in embed
     assert "🆔 公告編號" not in {field["name"] for field in embed["fields"]}
+    assert "🌐 官方公告" not in {field["name"] for field in embed["fields"]}
     assert session.closed is False
 
 
