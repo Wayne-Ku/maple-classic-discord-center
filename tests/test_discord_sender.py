@@ -111,7 +111,7 @@ def test_payload_embed_category_matches_category(category, expected_color, expec
     )
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert embed["color"] == expected_color
-    assert embed["fields"][0]["value"] == expected_display
+    assert f"公告分類：{expected_display}" in embed["description"]
 
 
 @pytest.mark.parametrize(
@@ -145,23 +145,21 @@ def test_normal_204_success_payload_and_mentions():
     assert payload["allowed_mentions"] == {"parse": []}
     assert payload["embeds"][0]["title"] == "🚨 標題"
     embed = payload["embeds"][0]
-    assert [field["name"] for field in embed["fields"]] == [
-        "🏷️ 公告分類",
-        "📅 公告日期",
-    ]
-    assert [field["value"] for field in embed["fields"]] == ["重要", "2026/07/23"]
-    assert all(field["inline"] is True for field in embed["fields"])
+    assert "fields" not in embed
+    assert embed["description"] == "🏷️ 公告分類：重要     📅 公告日期：2026/07/23\n\n"
+    assert "公告分類：" in embed["description"]
+    assert "公告日期：" in embed["description"]
+    assert "官方公告" not in embed["description"]
+    assert "公告編號" not in embed["description"]
     assert embed["author"] == {"name": "新楓之谷：經典版官方消息"}
     assert embed["footer"] == {
         "text": "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
     }
     assert "thumbnail" not in embed
-    assert "🆔 公告編號" not in {field["name"] for field in embed["fields"]}
-    assert "🌐 官方公告" not in {field["name"] for field in embed["fields"]}
     assert session.closed is False
 
 
-def test_spacer_emoji_prefixes_only_category_and_date_values():
+def test_spacer_emoji_is_not_used_in_description_layout():
     session = FakeSession([FakeResponse(204)])
     emoji = "<:blank:123456789012345678>"
 
@@ -174,11 +172,9 @@ def test_spacer_emoji_prefixes_only_category_and_date_values():
     )
 
     embed = session.calls[0][1]["json"]["embeds"][0]
-    assert len(embed["fields"]) == 2
-    assert [field["value"] for field in embed["fields"]] == [
-        f"{emoji} 活動",
-        f"{emoji} 2026/07/23",
-    ]
+    assert "fields" not in embed
+    assert embed["description"] == "🏷️ 公告分類：活動     📅 公告日期：2026/07/23\n\n"
+    assert emoji not in embed["description"]
     assert embed["url"] == "https://example.com/1"
     assert embed["footer"]["text"] == "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
 
@@ -283,8 +279,8 @@ def test_embed_values_are_safely_truncated():
     embed = session.calls[0][1]["json"]["embeds"][0]
     assert len(embed["title"]) == 256
     assert len(embed["author"]["name"]) <= 256
-    assert all(field["name"] and len(field["name"]) <= 256 for field in embed["fields"])
-    assert all(field["value"] and len(field["value"]) <= 1024 for field in embed["fields"])
+    assert "fields" not in embed
+    assert embed["description"] and len(embed["description"]) <= 4096
     assert embed["footer"]["text"] and len(embed["footer"]["text"]) <= 2048
 
 

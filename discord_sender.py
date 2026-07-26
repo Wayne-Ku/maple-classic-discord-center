@@ -129,37 +129,21 @@ def send_announcement(
     except ValueError as exc:
         raise DiscordSendError(str(exc)) from exc
     try:
-        spacer_emoji = validate_discord_spacer_emoji(spacer_emoji)
+        validate_discord_spacer_emoji(spacer_emoji)
     except ValueError as exc:
         raise DiscordSendError(str(exc)) from exc
 
+    description = _truncate(
+        f"🏷️ 公告分類：{_normalize_category(announcement.category)}     "
+        f"📅 公告日期：{announcement.date}\n\n",
+        4096,
+    )
     embed = {
         "author": {"name": _truncate("新楓之谷：經典版官方消息", 256)},
         "title": get_embed_title(announcement.category, announcement.title),
         "url": announcement.url,
         "color": get_category_color(announcement.category),
-        "fields": [
-            {
-                "name": _truncate("🏷️ 公告分類", 256),
-                "value": _truncate(
-                    f"{spacer_emoji} {_normalize_category(announcement.category)}"
-                    if spacer_emoji
-                    else _normalize_category(announcement.category),
-                    1024,
-                ),
-                "inline": True,
-            },
-            {
-                "name": _truncate("📅 公告日期", 256),
-                "value": _truncate(
-                    f"{spacer_emoji} {announcement.date}"
-                    if spacer_emoji
-                    else announcement.date,
-                    1024,
-                ),
-                "inline": True,
-            },
-        ],
+        "description": description,
         "footer": {
             "text": _truncate(
                 "Maple Classic Discord Center｜羽田製作\n"
