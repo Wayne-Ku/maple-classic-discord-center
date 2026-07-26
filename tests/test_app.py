@@ -12,10 +12,19 @@ def make_config(path: Path, test_mode: bool = False) -> Config:
 
 
 def make_config_with_thumbnail(
-    path: Path, test_mode: bool = False, thumbnail_url: str | None = None
+    path: Path,
+    test_mode: bool = False,
+    thumbnail_url: str | None = None,
+    spacer_emoji: str | None = None,
 ) -> Config:
     return Config(
-        "https://discord.invalid/webhook", test_mode, path, 5, "test", thumbnail_url
+        "https://discord.invalid/webhook",
+        test_mode,
+        path,
+        5,
+        "test",
+        thumbnail_url,
+        spacer_emoji,
     )
 
 
@@ -89,7 +98,14 @@ def test_test_mode_passes_thumbnail_url(monkeypatch, tmp_path):
     assert app.run(
         make_config_with_thumbnail(path, test_mode=True, thumbnail_url="https://cdn.example.com/logo")
     ) == 0
-    assert calls == [{"timeout": 5, "user_agent": "test", "thumbnail_url": "https://cdn.example.com/logo"}]
+    assert calls == [
+        {
+            "timeout": 5,
+            "user_agent": "test",
+            "thumbnail_url": "https://cdn.example.com/logo",
+            "spacer_emoji": None,
+        }
+    ]
 
 
 def test_normal_mode_passes_none_thumbnail_url(monkeypatch, tmp_path):
@@ -103,7 +119,43 @@ def test_normal_mode_passes_none_thumbnail_url(monkeypatch, tmp_path):
     )
 
     assert app.run(make_config_with_thumbnail(path)) == 0
-    assert calls == [{"timeout": 5, "user_agent": "test", "thumbnail_url": None}]
+    assert calls == [
+        {
+            "timeout": 5,
+            "user_agent": "test",
+            "thumbnail_url": None,
+            "spacer_emoji": None,
+        }
+    ]
+
+
+def test_test_mode_passes_spacer_emoji(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    emoji = "<:blank:123456789012345678>"
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+
+    assert app.run(make_config_with_thumbnail(path, test_mode=True, spacer_emoji=emoji)) == 0
+    assert calls[0]["spacer_emoji"] == emoji
+
+
+def test_normal_mode_passes_spacer_emoji(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"version": 1, "sent_announcement_ids": ["1"]}', encoding="utf-8")
+    emoji = "<:blank:123456789012345678>"
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+
+    assert app.run(make_config_with_thumbnail(path, spacer_emoji=emoji)) == 0
+    assert calls[0]["spacer_emoji"] == emoji
 
 
 def test_no_new_announcements_does_not_send_or_write(monkeypatch, tmp_path):

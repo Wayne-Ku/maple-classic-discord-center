@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -31,6 +32,19 @@ def validate_https_image_url(value: str | None) -> str | None:
     return url
 
 
+def validate_discord_spacer_emoji(value: str | None) -> str | None:
+    """Return an optional static Discord custom emoji used as a visual spacer."""
+    if value is None or not value.strip():
+        return None
+
+    emoji = value.strip()
+    if not re.fullmatch(r"<:[A-Za-z0-9_]+:\d+>", emoji):
+        raise ValueError(
+            "DISCORD_SPACER_EMOJI 必須是 <:name:numeric_id> 格式的靜態 Discord 自訂 Emoji"
+        )
+    return emoji
+
+
 @dataclass(frozen=True)
 class Config:
     discord_webhook_url: str | None
@@ -39,6 +53,7 @@ class Config:
     request_timeout: float
     user_agent: str
     maple_thumbnail_url: str | None = None
+    discord_spacer_emoji: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -60,5 +75,8 @@ class Config:
             ),
             maple_thumbnail_url=validate_https_image_url(
                 os.getenv("MAPLE_THUMBNAIL_URL")
+            ),
+            discord_spacer_emoji=validate_discord_spacer_emoji(
+                os.getenv("DISCORD_SPACER_EMOJI")
             ),
         )

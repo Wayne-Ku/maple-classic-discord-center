@@ -161,6 +161,28 @@ def test_normal_204_success_payload_and_mentions():
     assert session.closed is False
 
 
+def test_spacer_emoji_prefixes_only_category_and_date_values():
+    session = FakeSession([FakeResponse(204)])
+    emoji = "<:blank:123456789012345678>"
+
+    send_announcement(
+        WEBHOOK,
+        announcement(category="活動"),
+        user_agent="test",
+        spacer_emoji=emoji,
+        session=session,
+    )
+
+    embed = session.calls[0][1]["json"]["embeds"][0]
+    assert len(embed["fields"]) == 2
+    assert [field["value"] for field in embed["fields"]] == [
+        f"{emoji} 活動",
+        f"{emoji} 2026/07/23",
+    ]
+    assert embed["url"] == "https://example.com/1"
+    assert embed["footer"]["text"] == "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
+
+
 def test_thumbnail_url_adds_embed_author_and_footer_icons():
     session = FakeSession([FakeResponse(204)])
     thumbnail_url = "https://cdn.example.com/maple-logo"

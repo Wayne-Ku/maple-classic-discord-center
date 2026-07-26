@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from config import validate_https_image_url
+from config import validate_discord_spacer_emoji, validate_https_image_url
 from maple_parser import Announcement
 
 
@@ -117,6 +117,7 @@ def send_announcement(
     timeout: float = 15,
     user_agent: str,
     thumbnail_url: str | None = None,
+    spacer_emoji: str | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -125,6 +126,10 @@ def send_announcement(
     _validate_webhook_url(webhook_url)
     try:
         thumbnail_url = validate_https_image_url(thumbnail_url)
+    except ValueError as exc:
+        raise DiscordSendError(str(exc)) from exc
+    try:
+        spacer_emoji = validate_discord_spacer_emoji(spacer_emoji)
     except ValueError as exc:
         raise DiscordSendError(str(exc)) from exc
 
@@ -136,12 +141,22 @@ def send_announcement(
         "fields": [
             {
                 "name": _truncate("🏷️ 公告分類", 256),
-                "value": _truncate(_normalize_category(announcement.category), 1024),
+                "value": _truncate(
+                    f"{spacer_emoji} {_normalize_category(announcement.category)}"
+                    if spacer_emoji
+                    else _normalize_category(announcement.category),
+                    1024,
+                ),
                 "inline": True,
             },
             {
                 "name": _truncate("📅 公告日期", 256),
-                "value": _truncate(announcement.date, 1024),
+                "value": _truncate(
+                    f"{spacer_emoji} {announcement.date}"
+                    if spacer_emoji
+                    else announcement.date,
+                    1024,
+                ),
                 "inline": True,
             },
         ],

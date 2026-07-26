@@ -30,3 +30,32 @@ def test_thumbnail_url_rejects_non_https_or_missing_host(monkeypatch, thumbnail_
 
     with pytest.raises(ValueError, match="MAPLE_THUMBNAIL_URL"):
         Config.from_env()
+
+
+def test_spacer_emoji_is_none_when_unset(monkeypatch):
+    monkeypatch.delenv("DISCORD_SPACER_EMOJI", raising=False)
+
+    assert Config.from_env().discord_spacer_emoji is None
+
+
+def test_spacer_emoji_accepts_static_custom_emoji(monkeypatch):
+    emoji = "<:blank:123456789012345678>"
+    monkeypatch.setenv("DISCORD_SPACER_EMOJI", emoji)
+
+    assert Config.from_env().discord_spacer_emoji == emoji
+
+
+@pytest.mark.parametrize(
+    "spacer_emoji",
+    [
+        "blank:123456789012345678",
+        "<:blank:not-a-number>",
+        "<a:blank:123456789012345678>",
+        "🫥",
+    ],
+)
+def test_spacer_emoji_rejects_invalid_formats(monkeypatch, spacer_emoji):
+    monkeypatch.setenv("DISCORD_SPACER_EMOJI", spacer_emoji)
+
+    with pytest.raises(ValueError, match="DISCORD_SPACER_EMOJI"):
+        Config.from_env()
