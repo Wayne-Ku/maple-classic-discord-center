@@ -2,9 +2,19 @@ from pathlib import Path
 
 import app
 import pytest
+from announcement_detail import AnnouncementDetail, TextBlock
 from config import Config
 from maple_parser import Announcement
 from state_store import load_sent_ids
+
+
+@pytest.fixture(autouse=True)
+def mock_announcement_detail(monkeypatch):
+    monkeypatch.setattr(
+        app,
+        "fetch_announcement_detail",
+        lambda *_args, **_kwargs: AnnouncementDetail("正文", images=()),
+    )
 
 
 def make_config(path: Path, test_mode: bool = False) -> Config:
@@ -104,6 +114,7 @@ def test_test_mode_passes_thumbnail_url(monkeypatch, tmp_path):
             "user_agent": "test",
             "thumbnail_url": "https://cdn.example.com/logo",
             "spacer_emoji": None,
+            "blocks": (TextBlock("正文"),),
         }
     ]
 
@@ -125,6 +136,7 @@ def test_normal_mode_passes_none_thumbnail_url(monkeypatch, tmp_path):
             "user_agent": "test",
             "thumbnail_url": None,
             "spacer_emoji": None,
+            "blocks": (TextBlock("正文"),),
         }
     ]
 
@@ -139,13 +151,22 @@ def test_test_mode_passes_spacer_emoji(monkeypatch, tmp_path):
         app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
     )
 
-    assert app.run(make_config_with_thumbnail(path, test_mode=True, spacer_emoji=emoji)) == 0
+    assert app.run(
+        make_config_with_thumbnail(
+            path,
+            test_mode=True,
+            spacer_emoji=emoji,
+        )
+    ) == 0
     assert calls[0]["spacer_emoji"] == emoji
 
 
 def test_normal_mode_passes_spacer_emoji(monkeypatch, tmp_path):
     path = tmp_path / "state.json"
-    path.write_text('{"version": 1, "sent_announcement_ids": ["1"]}', encoding="utf-8")
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
     emoji = "<:blank:123456789012345678>"
     items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
     calls = []
@@ -154,8 +175,61 @@ def test_normal_mode_passes_spacer_emoji(monkeypatch, tmp_path):
         app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
     )
 
-    assert app.run(make_config_with_thumbnail(path, spacer_emoji=emoji)) == 0
+    assert app.run(
+        make_config_with_thumbnail(path, spacer_emoji=emoji)
+    ) == 0
     assert calls[0]["spacer_emoji"] == emoji
+
+
+def test_detail_failure_falls_back_without_content_blocks(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
+    items = [Announcement("2", "活動", "新公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app,
+        "fetch_announcement_detail",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            app.AnnouncementDetailError("missing")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda _url, _item, **kwargs: calls.append(kwargs),
+    )
+
+    assert app.run(make_config(path)) == 0
+    assert "blocks" not in calls[0]
+    assert load_sent_ids(path) == {"1", "2"}
+
+
+def test_each_new_announcement_fetches_detail_once(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
+    items = [
+        Announcement("3", "活動", "最新", "2026/02/03", "https://x/3"),
+        Announcement("2", "活動", "較舊", "2026/02/02", "https://x/2"),
+    ]
+    fetched = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+
+    def fetch_detail(item, **_kwargs):
+        fetched.append(item.announcement_id)
+        return AnnouncementDetail(f"正文 {item.announcement_id}")
+
+    monkeypatch.setattr(app, "fetch_announcement_detail", fetch_detail)
+    monkeypatch.setattr(app, "send_announcement", lambda *_args, **_kwargs: None)
+
+    assert app.run(make_config(path)) == 0
+    assert fetched == ["2", "3"]
 
 
 def test_no_new_announcements_does_not_send_or_write(monkeypatch, tmp_path):

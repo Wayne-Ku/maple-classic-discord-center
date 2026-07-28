@@ -1,10 +1,112 @@
-import pytest
+﻿import pytest
 import requests
 
-from discord_sender import DiscordSendError, get_category_color, get_category_display, send_announcement
+from announcement_detail import ImageBlock, TextBlock
+from discord_sender import (
+    DiscordSendError,
+    _format_announcement_content,
+    format_content_descriptions,
+    get_category_color,
+    get_category_display,
+    send_announcement,
+)
 from maple_parser import Announcement
 
 WEBHOOK = "https://discord.com/api/webhooks/123456/test-token"
+
+
+def test_announcement_content_presentation_cleanup_preserves_official_body():
+    content = (
+        "── 活動內容　 \n"
+        "------------------------\n"
+        "活動時間： 2026/07/23\n"
+        "\n\n\n"
+        "──── 注意事項\n"
+        "──────────────────────\n"
+        "活動方式：　完成任務\n"
+        "傳送門\n"
+        "【預先下載、事前創角】\n"
+        "《新楓之谷：經典版》\n"
+        "活動獎勵：道具\n"
+        "營運團隊 敬上　 "
+    )
+
+    assert _format_announcement_content(content) == (
+        "📌 活動內容\n"
+        "活動時間： 2026/07/23\n"
+        "⚠️ 注意事項\n"
+        "活動方式： 完成任務\n"
+        "🔗 傳送門\n"
+        "▶ 預先下載、事前創角\n"
+        "《新楓之谷：經典版》\n"
+        "活動獎勵：道具\n"
+        "營運團隊 敬上"
+    )
+
+
+def test_payload_body_spacing_matches_compact_82178_layout():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        blocks=(
+            TextBlock("親愛的冒險者們：\n\n第一段\n\n第二段\n\n注意事項"),
+        ),
+        session=session,
+    )
+
+    description = session.calls[0][1]["json"]["embeds"][0]["description"]
+    assert "\n\n📄 **公告內容**\n" in description
+    body = description.split("📄 **公告內容**\n", 1)[1]
+    assert body == "親愛的冒險者們：\n第一段\n第二段\n⚠️ 注意事項"
+    assert "\n\n" not in body
+
+
+def test_link_icons_are_outside_markdown_and_portal_has_one_blank_line():
+    support_url = "https://support.example.com/faq"
+    result = _format_announcement_content(
+        f"整合FAQ : [傳送門]({support_url})"
+    )
+
+    assert result == f"整合FAQ：\n\n🔗 [傳送門]({support_url})"
+    assert "[🔗 傳送門]" not in result
+    assert result.count(support_url) == 1
+
+
+def test_reliable_social_and_official_hosts_get_external_icons():
+    facebook_url = "https://www.facebook.com/maple"
+    instagram_url = "https://www.instagram.com/maple/"
+    official_url = "https://maplestoryclassic.beanfun.com/bulletin"
+    result = _format_announcement_content(
+        f"[官方粉絲團]({facebook_url})\n"
+        f"[Instagram 官方帳號]({instagram_url})\n"
+        f"[官方網站]({official_url})"
+    )
+
+    assert f"🍁 [官方粉絲團]({facebook_url})" in result
+    assert f"🍁 [Instagram 官方帳號]({instagram_url})" in result
+    assert f"🌐 [官方網站]({official_url})" in result
+    assert result.count(facebook_url) == 1
+    assert result.count(instagram_url) == 1
+    assert result.count(official_url) == 1
+
+
+def test_official_portal_link_uses_portal_icon_instead_of_official_site_icon():
+    portal_url = "https://maplestoryclassic-event.beanfun.com/Event/E20260701/Index"
+    result = _format_announcement_content(
+        f"[事前預約傳送門]({portal_url})"
+    )
+
+    assert result == f"🔗 [事前預約傳送門]({portal_url})"
+
+
+def test_unknown_host_link_does_not_get_a_guessed_icon():
+    result = _format_announcement_content(
+        "[一般連結](https://example.com/path)"
+    )
+
+    assert result == "[一般連結](https://example.com/path)"
 
 
 class FakeResponse:
@@ -159,24 +261,13 @@ def test_normal_204_success_payload_and_mentions():
     assert session.closed is False
 
 
-def test_spacer_emoji_is_not_used_in_description_layout():
+def test_history_mode_adds_history_footer_line_only():
     session = FakeSession([FakeResponse(204)])
-    emoji = "<:blank:123456789012345678>"
+    send_announcement(WEBHOOK, announcement(), user_agent="test", history_mode=True, session=session)
 
-    send_announcement(
-        WEBHOOK,
-        announcement(category="活動"),
-        user_agent="test",
-        spacer_emoji=emoji,
-        session=session,
+    assert session.calls[0][1]["json"]["embeds"][0]["footer"]["text"] == (
+        "Maple Classic Discord Center｜羽田製作\n🏞️ 歷史公告\n公告 ID：1"
     )
-
-    embed = session.calls[0][1]["json"]["embeds"][0]
-    assert "fields" not in embed
-    assert embed["description"] == "🏷️ 公告分類：活動　　📅 公告日期：2026/07/23\n\n"
-    assert emoji not in embed["description"]
-    assert embed["url"] == "https://example.com/1"
-    assert embed["footer"]["text"] == "Maple Classic Discord Center｜羽田製作\n公告 ID：1"
 
 
 def test_thumbnail_url_adds_embed_author_and_footer_icons():
@@ -303,3 +394,246 @@ def test_owned_session_is_closed(monkeypatch):
     monkeypatch.setattr("discord_sender.requests.Session", lambda: session)
     send_announcement(WEBHOOK, announcement(), user_agent="test")
     assert session.closed is True
+
+
+def portal_content() -> str:
+    return (
+        "傳送門\n"
+        "【\n"
+        "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)\n"
+        "】\n"
+        "【\n"
+        "[新楓之谷：經典版 Instagram 官方帳號](https://instagram.example.com/maple)\n"
+        "】"
+    )
+
+
+def test_portal_links_are_markdown_without_wrapper_brackets():
+    result = _format_announcement_content(portal_content())
+
+    assert result == (
+        "🔗 傳送門\n\n"
+        "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)\n"
+        "[新楓之谷：經典版 Instagram 官方帳號](https://instagram.example.com/maple)"
+    )
+    assert "【\n" not in result and "\n】" not in result
+    assert "🍁" not in result
+    assert result.count("https://facebook.example.com/maple") == 1
+    assert result.count("https://instagram.example.com/maple") == 1
+
+
+def test_portal_link_blocks_are_unwrapped_with_one_blank_line_before_links():
+    content = (
+        "傳送門\n\n"
+        "【\n"
+        "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)\n"
+        "】\n\n"
+        "【\n"
+        "[新楓之谷：經典版 Instagram 官方帳號](https://instagram.example.com/maple)\n"
+        "】"
+    )
+
+    assert _format_announcement_content(content) == (
+        "🔗 傳送門\n\n"
+        "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)\n"
+        "[新楓之谷：經典版 Instagram 官方帳號](https://instagram.example.com/maple)"
+    )
+
+
+def test_portal_markdown_links_are_in_discord_payload_without_duplicate_urls():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(WEBHOOK, announcement(), user_agent="test", content=portal_content(), session=session)
+
+    description = session.calls[0][1]["json"]["embeds"][0]["description"]
+    assert "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)" in description
+    assert "[新楓之谷：經典版 Instagram 官方帳號](https://instagram.example.com/maple)" in description
+    assert description.count("https://facebook.example.com/maple") == 1
+    assert description.count("https://instagram.example.com/maple") == 1
+
+
+def test_non_portal_markdown_link_does_not_gain_maple_emoji():
+    result = _format_announcement_content("一般說明\n[官方網站](https://example.com)")
+
+    assert "[官方網站](https://example.com)" in result
+    assert "🍁 [官方網站]" not in result
+
+
+def test_long_content_descriptions_do_not_split_markdown_links():
+    link = "[新楓之谷：經典版 官方粉絲團](https://facebook.example.com/maple)"
+    descriptions = format_content_descriptions(
+        announcement(), "x" * 4050 + "\n" + portal_content()
+    )
+
+    assert 1 < len(descriptions) <= 10
+    assert all(len(description) <= 4096 for description in descriptions)
+    assert sum(link in description for description in descriptions) == 1
+    assert sum(description.count("[") for description in descriptions) == 2
+
+def test_ordered_blocks_send_text_then_images_then_trailing_text():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        blocks=(
+            TextBlock("intro text\nsetup guide:"),
+            ImageBlock("https://cdn.example.com/guide-1.jpg"),
+            ImageBlock("https://cdn.example.com/guide-2.jpg"),
+            TextBlock("closing text"),
+        ),
+        session=session,
+    )
+    embeds = session.calls[0][1]["json"]["embeds"]
+    assert "intro text" in embeds[0]["description"]
+    assert "setup guide:" in embeds[0]["description"]
+    assert embeds[1] == {"image": {"url": "https://cdn.example.com/guide-1.jpg"}}
+    assert embeds[2] == {"image": {"url": "https://cdn.example.com/guide-2.jpg"}}
+    assert "closing text" in embeds[3]["description"]
+    assert all("footer" not in embed for embed in embeds[:3])
+    assert embeds[3]["footer"]["text"].endswith("公告 ID：1")
+
+
+def test_82176_golden_payload_keeps_footer_after_images_and_short_closing_text():
+    item = Announcement(
+        "82176",
+        "活動",
+        "事前創角活動提醒公告",
+        "2026/07/22",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82176",
+    )
+    image_one = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1784825248264.jpg"
+    image_two = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1784754689387.jpg"
+    session = FakeSession([FakeResponse(204)])
+
+    send_announcement(
+        WEBHOOK,
+        item,
+        user_agent="test",
+        history_mode=True,
+        blocks=(
+            TextBlock("親愛的冒險者們：\n\n公告正文\n\n事前創角教學 :"),
+            ImageBlock(image_one),
+            ImageBlock(image_two),
+            TextBlock("《新楓之谷：經典版》營運團隊 敬上"),
+        ),
+        session=session,
+    )
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    assert len(embeds) == 4
+    assert embeds[0]["description"].endswith("事前創角教學：")
+    assert embeds[1] == {"image": {"url": image_one}}
+    assert embeds[2] == {"image": {"url": image_two}}
+    assert embeds[3]["description"] == "《新楓之谷：經典版》營運團隊 敬上"
+    assert all("footer" not in embed for embed in embeds[:3])
+    assert embeds[3]["footer"]["text"] == (
+        "Maple Classic Discord Center｜羽田製作\n"
+        "🏞️ 歷史公告\n"
+        "公告 ID：82176"
+    )
+
+
+def test_82221_golden_payload_has_clean_unique_markdown_links_and_final_footer():
+    facebook_url = "https://www.facebook.com/profile.php?id=61590171137957"
+    instagram_url = "https://www.instagram.com/maplestory_classic_tw/"
+    item = Announcement(
+        "82221",
+        "活動",
+        "事前創角活動截止公告",
+        "2026/07/28",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82221",
+    )
+    session = FakeSession([FakeResponse(204)])
+
+    send_announcement(
+        WEBHOOK,
+        item,
+        user_agent="test",
+        history_mode=True,
+        blocks=(
+            TextBlock(
+                "公告正文\n\n"
+                f"【[新楓之谷：經典版 官方粉絲團]({facebook_url})\n】\n\n"
+                f"【[新楓之谷：經典版 Instagram 官方帳號]({instagram_url})\n】\n\n"
+                "《新楓之谷：經典版》營運團隊 敬上"
+            ),
+        ),
+        session=session,
+    )
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    combined = "\n".join(embed.get("description", "") for embed in embeds)
+    assert f"[新楓之谷：經典版 官方粉絲團]({facebook_url})" in combined
+    assert f"[新楓之谷：經典版 Instagram 官方帳號]({instagram_url})" in combined
+    assert combined.count(facebook_url) == 1
+    assert combined.count(instagram_url) == 1
+    assert not any(line.strip() in {"【", "】", "[", "]"} for line in combined.splitlines())
+    assert "\n\n\n" not in combined
+    assert all("footer" not in embed for embed in embeds[:-1])
+    assert embeds[-1]["footer"]["text"].endswith("公告 ID：82221")
+
+
+def test_last_image_block_adds_a_footer_only_closing_embed():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        blocks=(
+            TextBlock("body"),
+            ImageBlock("https://cdn.example.com/final.jpg"),
+        ),
+        session=session,
+    )
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    assert len(embeds) == 3
+    assert embeds[1] == {"image": {"url": "https://cdn.example.com/final.jpg"}}
+    assert embeds[2]["description"] == "\u200b"
+    assert "footer" not in embeds[0]
+    assert embeds[2]["footer"]["text"].endswith("公告 ID：1")
+
+
+def test_ordered_blocks_are_capped_at_ten_embeds_with_a_notice():
+    session = FakeSession([FakeResponse(204)])
+    blocks = (TextBlock("body"),) + tuple(ImageBlock(f"https://cdn.example.com/{index}.jpg") for index in range(12))
+    send_announcement(WEBHOOK, announcement(), user_agent="test", blocks=blocks, session=session)
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    assert len(embeds) == 10
+    assert "body" in embeds[0]["description"]
+    assert embeds[1] == {"image": {"url": "https://cdn.example.com/0.jpg"}}
+    assert "description" in embeds[-1]
+    assert "image" not in embeds[-1]
+
+
+def test_long_text_block_splits_before_its_following_image_and_trailing_text():
+    session = FakeSession([FakeResponse(204)])
+    blocks = (
+        TextBlock("a" * 5000),
+        ImageBlock("https://cdn.example.com/ordered.jpg"),
+        TextBlock("after image"),
+    )
+    send_announcement(WEBHOOK, announcement(), user_agent="test", blocks=blocks, session=session)
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    image_index = next(index for index, embed in enumerate(embeds) if "image" in embed)
+    assert all(len(embed["description"]) <= 4096 for embed in embeds if "description" in embed)
+    assert embeds[image_index] == {"image": {"url": "https://cdn.example.com/ordered.jpg"}}
+    assert "after image" in embeds[image_index + 1]["description"]
+
+
+def test_invalid_image_urls_do_not_prevent_text_delivery():
+    session = FakeSession([FakeResponse(204)])
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        content="正文",
+        images=("data:image/gif;base64,x", "not-a-url"),
+        session=session,
+    )
+    embeds = session.calls[0][1]["json"]["embeds"]
+    assert len(embeds) == 1
+    assert "image" not in embeds[0]
+    assert "正文" in embeds[0]["description"]

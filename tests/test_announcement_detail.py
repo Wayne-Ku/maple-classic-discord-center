@@ -3,7 +3,7 @@
 import pytest
 import requests
 
-from announcement_detail import AnnouncementDetailError, MAX_PLAIN_TEXT_LENGTH, _html_to_text, fetch_announcement_detail
+from announcement_detail import AnnouncementDetailError, ImageBlock, MAX_PLAIN_TEXT_LENGTH, TextBlock, _html_to_text, fetch_announcement_detail
 from maple_parser import Announcement
 
 
@@ -128,6 +128,91 @@ def test_body_length_is_safely_limited():
     assert len(detail.plain_text) == MAX_PLAIN_TEXT_LENGTH
 
 
-def test_html_anchor_text_is_plain_text():
-    html = '<a href="https://example.com/portal">官方連結</a><a href="javascript:alert(1)">不安全連結</a>'
-    assert _html_to_text(html) == "官方連結\n不安全連結"
+def test_html_anchors_become_markdown_and_duplicate_urls_are_removed():
+    html = (
+        '<a href="/portal">官方連結</a>'
+        '<a href="/portal">重複連結</a>'
+        '<a href="javascript:alert(1)">不安全連結</a>'
+    )
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+    assert detail.plain_text == "[官方連結](https://example.com/portal)\n重複連結\n不安全連結"
+    assert detail.links == ("https://example.com/portal",)
+
+
+def test_wrapped_anchor_brackets_are_removed_without_touching_normal_brackets():
+    html = (
+        "<p>正常括號【保留】</p>"
+        '<p><span>【</span><a href="/facebook">官方粉絲團</a><span>】</span></p>'
+        '<p><span>[</span><a href="/instagram">Instagram 官方帳號</a><span>]</span></p>'
+    )
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+
+    assert "正常括號【保留】" in detail.plain_text
+    assert "[官方粉絲團](https://example.com/facebook)" in detail.plain_text
+    assert "[Instagram 官方帳號](https://example.com/instagram)" in detail.plain_text
+    assert not any(
+        line.strip() in {"【", "】", "[", "]"}
+        for line in detail.plain_text.splitlines()
+    )
+
+
+def test_relative_content_images_are_absolute_and_noise_is_filtered():
+    html = (
+        '<p>正文</p><img src="/images/guide.jpg">'
+        '<img src="spacer.gif" class="spacer">'
+        '<img src="/pixel.gif" width="1" height="1">'
+        '<img src="https://cdn.example.com/logo.png" alt="site logo">'
+        '<img src="https://cdn.example.com/reward.jpg">'
+    )
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+    assert detail.images == (
+        "https://example.com/images/guide.jpg",
+        "https://cdn.example.com/reward.jpg",
+    )
+    assert "guide.jpg" not in detail.plain_text
+
+
+def test_detail_blocks_follow_text_image_text_dom_order():
+    html = '<p>before <a href="/event">event page</a></p><img src="/images/guide.jpg"><p>after</p>'
+    detail = fetch_announcement_detail(item(), timeout=1, user_agent="test", session=Session([Response({"data": {"content": html}})]))
+
+    assert detail.blocks == (
+        TextBlock("before [event page](https://example.com/event)"),
+        ImageBlock("https://example.com/images/guide.jpg"),
+        TextBlock("after"),
+    )
+
+
+def test_detail_blocks_keep_multiple_images_and_intervening_text_in_order():
+    html = '<p>???</p><img src="/one.jpg"><p>???</p><img src="/two.jpg"><p>??</p>'
+    detail = fetch_announcement_detail(item(), timeout=1, user_agent="test", session=Session([Response({"data": {"content": html}})]))
+
+    assert detail.blocks == (
+        TextBlock("???"),
+        ImageBlock("https://example.com/one.jpg"),
+        TextBlock("???"),
+        ImageBlock("https://example.com/two.jpg"),
+        TextBlock("??"),
+    )
+
+
+def test_invalid_image_does_not_remove_following_text_block():
+    html = '<p>???</p><img src="data:image/gif;base64,x"><p>???</p>'
+    detail = fetch_announcement_detail(item(), timeout=1, user_agent="test", session=Session([Response({"data": {"content": html}})]))
+
+    assert detail.blocks == (TextBlock("???\n???"),)
