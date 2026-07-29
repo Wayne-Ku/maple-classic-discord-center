@@ -15,23 +15,27 @@ LOGGER = logging.getLogger("maple-classic-discord-center")
 
 
 def _send(config: Config, item: Announcement) -> None:
-    """Fetch official content when possible, then send with V1.3A fallback."""
-    detail = None
+    """Send only after official announcement content has parsed successfully."""
     try:
         detail = fetch_announcement_detail(
             item, timeout=config.request_timeout, user_agent=config.user_agent
         )
-    except AnnouncementDetailError:
-        LOGGER.warning("公告 %s 正文抓取失敗，將推播原始公告。", item.announcement_id)
+    except AnnouncementDetailError as exc:
+        LOGGER.warning(
+            "公告正文解析失敗：ID=%s title=%s reason=%s",
+            item.announcement_id,
+            item.title,
+            exc,
+        )
+        raise
 
     kwargs = {
         "timeout": config.request_timeout,
         "user_agent": config.user_agent,
         "thumbnail_url": config.maple_thumbnail_url,
         "spacer_emoji": config.discord_spacer_emoji,
+        "blocks": detail.blocks,
     }
-    if detail is not None:
-        kwargs["blocks"] = detail.blocks
     send_announcement(config.discord_webhook_url or "", item, **kwargs)
 
 
@@ -81,7 +85,13 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         return run(Config.from_env())
-    except (ValueError, MapleParserError, DiscordSendError, StateStoreError) as exc:
+    except (
+        ValueError,
+        AnnouncementDetailError,
+        MapleParserError,
+        DiscordSendError,
+        StateStoreError,
+    ) as exc:
         LOGGER.error("%s", exc)
         return 1
     except Exception:

@@ -637,3 +637,29 @@ def test_invalid_image_urls_do_not_prevent_text_delivery():
     assert len(embeds) == 1
     assert "image" not in embeds[0]
     assert "正文" in embeds[0]["description"]
+
+
+def test_full_page_template_is_rejected_before_webhook_payload_is_created():
+    session = FakeSession([])
+    template = (
+        '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN">'
+        "<html><body>"
+        "Start search bar End search bar "
+        "start google ad end google ad "
+        "Begin: Pagination End: Pagination comScore"
+        "</body></html>"
+    )
+
+    with pytest.raises(DiscordSendError) as error:
+        send_announcement(
+            WEBHOOK,
+            announcement(title="不應發送"),
+            user_agent="test",
+            content=template,
+            session=session,
+        )
+
+    assert session.calls == []
+    assert "ID=1" in str(error.value)
+    assert "title=不應發送" in str(error.value)
+    assert "疑似完整網站模板" in str(error.value)

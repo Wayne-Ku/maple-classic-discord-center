@@ -10,7 +10,12 @@ from urllib.parse import urlsplit
 import requests
 
 from config import validate_discord_spacer_emoji, validate_https_image_url
-from announcement_detail import AnnouncementContentBlock, ImageBlock, TextBlock
+from announcement_detail import (
+    AnnouncementContentBlock,
+    ImageBlock,
+    TextBlock,
+    template_garbage_markers,
+)
 from maple_parser import Announcement
 
 
@@ -223,6 +228,28 @@ def _public_image_urls(images: Sequence[str] | None) -> list[str]:
             result.append(url)
     return result
 
+
+def _validate_content_safety(
+    announcement: Announcement,
+    *,
+    content: str | None,
+    blocks: Sequence[AnnouncementContentBlock] | None,
+) -> None:
+    source_text = content or ""
+    if blocks is not None:
+        source_text = "\n".join(
+            block.text for block in blocks if isinstance(block, TextBlock)
+        )
+    markers = template_garbage_markers(source_text)
+    if len(markers) >= 2:
+        raise DiscordSendError(
+            "公告內容安全檢查失敗："
+            f"ID={announcement.announcement_id} "
+            f"title={announcement.title} "
+            f"reason=疑似完整網站模板（{', '.join(markers)}）"
+        )
+
+
 def _format_text_block(announcement: Announcement, text: str, *, include_header: bool) -> list[str]:
     prefix = (
         f"🏷️ 公告分類：{_normalize_category(announcement.category)}　　"
@@ -374,6 +401,12 @@ def send_announcement(
         validate_discord_spacer_emoji(spacer_emoji)
     except ValueError as exc:
         raise DiscordSendError(str(exc)) from exc
+
+    _validate_content_safety(
+        announcement,
+        content=content,
+        blocks=blocks,
+    )
 
     if blocks is not None:
         entries = format_content_entries(announcement, blocks)
