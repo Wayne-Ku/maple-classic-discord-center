@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import app
@@ -181,14 +182,13 @@ def test_normal_mode_passes_spacer_emoji(monkeypatch, tmp_path):
     assert calls[0]["spacer_emoji"] == emoji
 
 
-def test_detail_failure_falls_back_without_content_blocks(monkeypatch, tmp_path):
+def test_detail_failure_does_not_send_or_update_state(monkeypatch, tmp_path, caplog):
     path = tmp_path / "state.json"
     path.write_text(
         '{"version": 1, "sent_announcement_ids": ["1"]}',
         encoding="utf-8",
     )
     items = [Announcement("2", "活動", "新公告", "2026/02/02", "https://x/2")]
-    calls = []
     monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
     monkeypatch.setattr(
         app,
@@ -200,12 +200,17 @@ def test_detail_failure_falls_back_without_content_blocks(monkeypatch, tmp_path)
     monkeypatch.setattr(
         app,
         "send_announcement",
-        lambda _url, _item, **kwargs: calls.append(kwargs),
+        lambda *_args, **_kwargs: pytest.fail("must not send"),
     )
 
-    assert app.run(make_config(path)) == 0
-    assert "blocks" not in calls[0]
-    assert load_sent_ids(path) == {"1", "2"}
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(app.AnnouncementDetailError, match="missing"):
+            app.run(make_config(path))
+
+    assert load_sent_ids(path) == {"1"}
+    assert "ID=2" in caplog.text
+    assert "title=新公告" in caplog.text
+    assert "reason=missing" in caplog.text
 
 
 def test_each_new_announcement_fetches_detail_once(monkeypatch, tmp_path):

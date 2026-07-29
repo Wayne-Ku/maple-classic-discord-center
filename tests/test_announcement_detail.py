@@ -3,7 +3,16 @@
 import pytest
 import requests
 
-from announcement_detail import AnnouncementDetailError, ImageBlock, MAX_PLAIN_TEXT_LENGTH, TextBlock, _html_to_text, fetch_announcement_detail
+from announcement_detail import (
+    LEGACY_NEWS_API_URL,
+    AnnouncementDetailError,
+    ImageBlock,
+    MAX_PLAIN_TEXT_LENGTH,
+    TextBlock,
+    _html_to_text,
+    fetch_announcement_detail,
+    is_template_garbage,
+)
 from maple_parser import Announcement
 
 
@@ -42,6 +51,43 @@ def item():
     return Announcement("82221", "活動", "公告標題", "2026/07/28", "https://example.com/bulletin")
 
 
+def legacy_item():
+    return Announcement(
+        "82242",
+        "重要",
+        "【說明】gamapass 登入驗證次數重置說明",
+        "2026/07/29",
+        "https://tw.beanfun.com/news/content.aspx?"
+        "p=1&news_id=6057&c=1&t=2918&tc=Announcement&service_id=0",
+    )
+
+
+ANNOUNCEMENT_82242_CONTENT = """
+<p>親愛的會員 您好：</p>
+<p>今日 <span>14:00～14:40</span> 因流量眾多，影響部分玩家登入 gamapass 無法驗證</p>
+<p>我們預計 15:45~16:00 陸續進行驗證重置，請您稍後再次嘗試登入。</p>
+<p>造成您的不便，敬請見諒，感謝您的理解與支持。</p>
+<p>若您有任何疑問，歡迎參閱遊戲橘子常見問題，或聯繫客服中心協助處理。</p>
+<p>電話服務專線：(02)2192-6100（請按 2）</p>
+<p>遊戲橘子問題回報中心：
+<a href="https://games.crm.gamania.com/hc/zh-tw/requests/new">
+https://games.crm.gamania.com/hc/zh-tw/requests/new</a></p>
+<p>遊戲橘子客服中心 敬上</p>
+"""
+
+FULL_PAGE_TEMPLATE = """
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html><body onload="onLoad();">
+<!-- 20121130 beanfun end-year ad cover -->
+<!-- Start search bar --><!-- End search bar -->
+<!-- start google ad --><!-- end google ad -->
+<!-- Begin: Pagination --><!-- End: Pagination -->
+<iframe></iframe><script>comScore()</script>
+</body></html>
+"""
+
+
 def page(content):
     return (
         "<html><head><title>新楓之谷：經典版官方網站</title></head>"
@@ -73,6 +119,67 @@ def test_short_detail_api_body_is_valid_and_does_not_fallback():
     assert not session.get_calls
 
 
+def test_82242_uses_official_legacy_detail_api_and_preserves_content_link():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {"myDataSet": {"table": {"content": None}}},
+                }
+            ),
+            Response(
+                {
+                    "ResultCode": 1,
+                    "ResultData": {
+                        "NewsID": 6057,
+                        "Title": "gamapass 登入驗證次數重置說明",
+                        "Contents": ANNOUNCEMENT_82242_CONTENT,
+                    },
+                }
+            ),
+        ]
+    )
+
+    detail = fetch_announcement_detail(
+        legacy_item(),
+        timeout=1,
+        user_agent="test",
+        session=session,
+    )
+
+    assert "親愛的會員 您好" in detail.plain_text
+    assert "今日 14:00～14:40" in detail.plain_text
+    assert "我們預計 15:45～16:00" in detail.plain_text
+    assert "電話服務專線：(02)2192-6100（請按 2）" in detail.plain_text
+    assert (
+        "[https://games.crm.gamania.com/hc/zh-tw/requests/new]"
+        "(https://games.crm.gamania.com/hc/zh-tw/requests/new)"
+    ) in detail.plain_text
+    assert "遊戲橘子客服中心 敬上" in detail.plain_text
+    assert all(
+        value.casefold() not in detail.plain_text.casefold()
+        for value in (
+            "DOCTYPE",
+            "XHTML",
+            "W3C",
+            "Start search bar",
+            "google ad",
+            "Pagination",
+            "iframe",
+            "comScore",
+            "beanfun end-year ad cover",
+        )
+    )
+    assert len(session.post_calls) == 2
+    assert session.post_calls[1][0][0] == LEGACY_NEWS_API_URL
+    assert session.post_calls[1][1]["data"] == {
+        "NewsID": "6057",
+        "ServiceDataID": "0",
+    }
+    assert not session.get_calls
+
+
 def test_chrome_only_api_content_falls_back_to_html(caplog):
     session = Session(
         [Response({"code": 1, "data": {"myDataSet": {"table": {"content": "<title>新楓之谷：經典版官方網站</title>"}}}})],
@@ -96,6 +203,38 @@ def test_html_fallback_removes_chrome_and_keeps_paragraph_list_date_and_table():
 
     assert detail.plain_text == "更新日期：2026/07/28\n正文一\n條件 A\n時間\n10:00"
     assert all(value not in detail.plain_text for value in ("官方網站", "頁首", "導覽", "麵包屑", "側欄", "表單", "頁尾", "bad"))
+
+
+def test_full_page_template_without_approved_content_container_is_rejected():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {"myDataSet": {"table": {"content": None}}},
+                }
+            )
+        ],
+        [Response(text=FULL_PAGE_TEMPLATE)],
+    )
+
+    with pytest.raises(
+        AnnouncementDetailError,
+        match="suspected full-page website template",
+    ):
+        fetch_announcement_detail(
+            item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert len(session.get_calls) == 1
+
+
+def test_template_safety_requires_multiple_strong_markers():
+    assert is_template_garbage(FULL_PAGE_TEMPLATE) is True
+    assert is_template_garbage("公告說明：comScore 統計方式調整。") is False
 
 
 @pytest.mark.parametrize(

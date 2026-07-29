@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -14,13 +14,35 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from maple_parser import Announcement
 
 DETAIL_API_URL = "https://maplestoryclassic.beanfun.com/api/Bulletin/BulletinDetail"
+LEGACY_NEWS_API_URL = "https://gamaapi.beanfun.com/Api/News/GetNewsContent"
 MAX_PLAIN_TEXT_LENGTH = 20_000
 LOGGER = logging.getLogger("maple-classic-discord-center")
 
 _NON_BODY_TEXT = frozenset({"新楓之谷：經典版官方網站", "新楓之谷：經典版", "MapleStory Classic Official Website"})
-_HTML_CONTENT_SELECTORS = (".bulletin-detail__content", ".bulletin-content", ".announcement-content", ".content-detail", ".news-content", "article", "main")
+_HTML_CONTENT_SELECTORS = (
+    ".bulletin-detail__content",
+    ".bulletin-content",
+    ".announcement-content",
+    ".content-detail",
+    ".news-content",
+    ".NewsPageContent",
+)
 _IMAGE_NOISE_MARKERS = ("spacer", "tracking", "pixel", "transparent", "blank", "logo", "icon", "button", "btn", "top", "download")
 _BLOCK_TAGS = frozenset({"p", "div", "li", "ul", "ol", "table", "tr", "section", "article", "h2", "h3", "h4", "td", "th"})
+_TEMPLATE_GARBAGE_SIGNATURES = (
+    "doctype",
+    "xhtml 1.0 transitional",
+    "w3c//dtd",
+    "start search bar",
+    "end search bar",
+    "start google ad",
+    "end google ad",
+    "begin: pagination",
+    "end: pagination",
+    "comscore",
+    "<body",
+    "<html",
+)
 _WRAPPED_MARKDOWN_LINK_RE = re.compile(
     r"(?m)^[ \t]*[【\[][ \t]*(?:\n[ \t]*)?"
     r"(?P<link>\[[^\]\n]+\]\(https?://[^\s)]+\))[ \t]*(?:\n[ \t]*)?"
@@ -65,6 +87,7 @@ class AnnouncementDetail:
 
 def _clean_text(value: str) -> str:
     text = value.replace("\xa0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?<=\d)~(?=\d)", "～", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = _WRAPPED_MARKDOWN_LINK_RE.sub(r"\g<link>", text)
@@ -154,8 +177,27 @@ def _html_to_text(value: str, *, base_url: str = "https://maplestoryclassic.bean
     return _detail_from_html(value, base_url=base_url).plain_text
 
 
+def template_garbage_markers(value: str) -> tuple[str, ...]:
+    """Return strong full-page template signatures found in announcement text."""
+    normalized = value.casefold()
+    return tuple(
+        signature
+        for signature in _TEMPLATE_GARBAGE_SIGNATURES
+        if signature in normalized
+    )
+
+
+def is_template_garbage(value: str) -> bool:
+    """Require multiple strong signatures so ordinary announcement wording is safe."""
+    return len(template_garbage_markers(value)) >= 2
+
+
 def _usable_detail(detail: AnnouncementDetail) -> AnnouncementDetail | None:
-    if not detail.blocks or (detail.plain_text in _NON_BODY_TEXT and not detail.images):
+    if (
+        not detail.blocks
+        or (detail.plain_text in _NON_BODY_TEXT and not detail.images)
+        or is_template_garbage(detail.plain_text)
+    ):
         return None
     return detail
 
@@ -187,6 +229,33 @@ def _json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
     return None
 
 
+def _legacy_news_parameters(url: str) -> tuple[str, str] | None:
+    parsed = urlsplit(url)
+    if (
+        (parsed.hostname or "").casefold() != "tw.beanfun.com"
+        or parsed.path.casefold() != "/news/content.aspx"
+    ):
+        return None
+    query = parse_qs(parsed.query)
+    news_id = (query.get("news_id") or [""])[0].strip()
+    service_id = (query.get("service_id") or ["0"])[0].strip()
+    if not news_id.isdigit() or not service_id.isdigit():
+        return None
+    return news_id, service_id
+
+
+def _legacy_json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
+    if not isinstance(payload, dict) or payload.get("ResultCode") not in (1, "1"):
+        return None
+    result_data = payload.get("ResultData")
+    if not isinstance(result_data, dict):
+        return None
+    contents = result_data.get("Contents")
+    if not isinstance(contents, str) or not contents.strip():
+        return None
+    return _usable_detail(_detail_from_html(contents, base_url=base_url))
+
+
 def _html_detail(html: str, *, base_url: str) -> tuple[AnnouncementDetail | None, str]:
     if not isinstance(html, str) or not html.strip():
         return None, "document"
@@ -204,7 +273,9 @@ def _html_detail(html: str, *, base_url: str) -> tuple[AnnouncementDetail | None
         detail = _usable_detail(_detail_from_html(str(container), base_url=base_url))
         if detail:
             return detail, selector
-    return _usable_detail(_detail_from_html(str(soup), base_url=base_url)), "document"
+    if is_template_garbage(html):
+        return None, "rejected-template"
+    return None, "not-found"
 
 
 def fetch_announcement_detail(announcement: Announcement, *, timeout: float, user_agent: str, session: requests.Session | None = None) -> AnnouncementDetail:
@@ -231,6 +302,44 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
                 return detail
         except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
             LOGGER.info("Detail API unavailable: %s", type(exc).__name__)
+
+        legacy_parameters = _legacy_news_parameters(announcement.url)
+        if legacy_parameters is not None:
+            news_id, service_id = legacy_parameters
+            try:
+                LOGGER.info(
+                    "Legacy Detail API URL=%s Announcement ID=%s News ID=%s",
+                    LEGACY_NEWS_API_URL,
+                    announcement.announcement_id,
+                    news_id,
+                )
+                response = client.post(
+                    LEGACY_NEWS_API_URL,
+                    data={"NewsID": news_id, "ServiceDataID": service_id},
+                    headers=headers,
+                    timeout=timeout,
+                )
+                LOGGER.info(
+                    "Legacy Detail API HTTP Status Code=%s",
+                    getattr(response, "status_code", "unknown"),
+                )
+                response.raise_for_status()
+                detail = _legacy_json_detail(
+                    response.json(),
+                    base_url=announcement.url,
+                )
+                LOGGER.info(
+                    "Legacy Detail API Content Length=%d",
+                    len(detail.plain_text if detail else ""),
+                )
+                if detail:
+                    LOGGER.info("Legacy Detail API success")
+                    LOGGER.info("HTML Fallback=False")
+                    LOGGER.info("Final sent content length=%d", len(detail.plain_text))
+                    return detail
+            except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
+                LOGGER.info("Legacy Detail API unavailable: %s", type(exc).__name__)
+
         LOGGER.info("HTML Fallback=True")
         response = client.get(announcement.url, headers=headers, timeout=timeout)
         response.raise_for_status()
@@ -238,11 +347,30 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
         LOGGER.info("HTML selector=%s", selector)
         LOGGER.info("HTML extracted length=%d", len(detail.plain_text if detail else ""))
     except requests.RequestException as exc:
+        LOGGER.warning(
+            "Announcement detail parse failure: ID=%s title=%s reason=%s",
+            announcement.announcement_id,
+            announcement.title,
+            type(exc).__name__,
+        )
         raise AnnouncementDetailError("Unable to fetch official announcement content") from exc
     finally:
         if owns_session:
             client.close()
     if not detail:
-        raise AnnouncementDetailError("Official announcement content is empty")
+        if selector == "rejected-template":
+            reason = "HTML fallback rejected suspected full-page website template"
+        else:
+            reason = (
+                "official APIs returned no body and no approved HTML content "
+                "container was found"
+            )
+        LOGGER.warning(
+            "Announcement detail parse failure: ID=%s title=%s reason=%s",
+            announcement.announcement_id,
+            announcement.title,
+            reason,
+        )
+        raise AnnouncementDetailError(reason)
     LOGGER.info("Final sent content length=%d", len(detail.plain_text))
     return detail
