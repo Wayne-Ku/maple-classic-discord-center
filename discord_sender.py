@@ -98,9 +98,24 @@ def _format_announcement_content(content: str) -> str:
 
     formatted_lines: list[str] = []
     previous_was_link = False
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped_line = line.strip()
         if not stripped_line:
+            previous_line = formatted_lines[-1] if formatted_lines else ""
+            next_line = next(
+                (candidate.strip() for candidate in lines[index + 1 :] if candidate.strip()),
+                "",
+            )
+            table_boundary = (
+                next_line == "🎁 道具獎勵"
+                or next_line.startswith("• ")
+                or previous_line == "🎁 道具獎勵"
+                or previous_line.startswith("• ")
+                or previous_line.startswith("  ")
+                or "🎁 道具獎勵" in formatted_lines
+            )
+            if table_boundary and formatted_lines and formatted_lines[-1] != "":
+                formatted_lines.append("")
             continue
         matches = list(_MARKDOWN_LINK_RE.finditer(stripped_line))
         if len(matches) == 1:
@@ -114,14 +129,16 @@ def _format_announcement_content(content: str) -> str:
                     prefix = re.sub(r"\s*:\s*$", "：", prefix)
                 formatted_lines.append(prefix)
                 formatted_lines.append("")
-            elif formatted_lines and not previous_was_link:
+            elif formatted_lines and not previous_was_link and formatted_lines[-1] != "":
                 formatted_lines.append("")
             formatted_lines.append(link_line)
             if suffix:
                 formatted_lines.append(suffix)
             previous_was_link = True
             continue
-        formatted_lines.append(stripped_line)
+        formatted_lines.append(
+            f"  {stripped_line}" if line.startswith("  ") else stripped_line
+        )
         previous_was_link = False
 
     return "\n".join(formatted_lines).strip()

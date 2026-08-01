@@ -63,6 +63,49 @@ def test_payload_body_spacing_matches_compact_82178_layout():
     assert "\n\n" not in body
 
 
+def test_82273_reward_table_is_readable_in_final_discord_payload():
+    item = Announcement(
+        "82273",
+        "活動",
+        "新楓之谷：經典版《0731(五)開服三日感恩回饋公告》",
+        "2026/07/31",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82273",
+    )
+    content = (
+        "親愛的冒險者們：\n\n"
+        "感謝各位冒險者的支持與包容。\n\n"
+        "🎁 道具獎勵\n\n"
+        "• 經驗值1.5倍券（30分鐘） ×2｜14天\n"
+        "• 選擇欄位4格擴充券 ×1｜14天\n"
+        "• 蛋糕 ×100｜永久\n"
+        "• 回家卷軸 ×10｜永久\n\n"
+        "※獎勵領取時間：2026-07-31 ～ 2026-08-09 23:59\n\n"
+        "敬祝各位冒險者們遊戲愉快～\n\n"
+        "《新楓之谷：經典版》營運團隊 敬上"
+    )
+    session = FakeSession([FakeResponse(204)])
+
+    send_announcement(
+        WEBHOOK,
+        item,
+        user_agent="test",
+        blocks=(TextBlock(content),),
+        session=session,
+    )
+
+    embeds = session.calls[0][1]["json"]["embeds"]
+    description = embeds[0]["description"]
+    assert len(embeds) == 1
+    assert "🎁 道具獎勵\n\n• 經驗值1.5倍券（30分鐘） ×2｜14天" in description
+    assert "• 回家卷軸 ×10｜永久\n\n※獎勵領取時間" in description
+    assert "23:59\n\n敬祝各位冒險者們遊戲愉快～" in description
+    assert "遊戲愉快～\n\n《新楓之谷：經典版》營運團隊 敬上" in description
+    assert "道具名稱\n數量\n期限" not in description
+    assert embeds[0]["footer"]["text"] == (
+        "Maple Classic Discord Center｜羽田製作\n公告 ID：82273"
+    )
+
+
 def test_link_icons_are_outside_markdown_and_portal_has_one_blank_line():
     support_url = "https://support.example.com/faq"
     result = _format_announcement_content(

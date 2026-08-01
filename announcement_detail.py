@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -48,6 +49,8 @@ _WRAPPED_MARKDOWN_LINK_RE = re.compile(
     r"(?P<link>\[[^\]\n]+\]\(https?://[^\s)]+\))[ \t]*(?:\n[ \t]*)?"
     r"[】\]][ \t]*$"
 )
+_TABLE_CONTINUATION_TOKEN = "\uf000"
+_TABLE_COLUMN_NAMES = ("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
 
 
 class AnnouncementDetailError(RuntimeError):
@@ -87,11 +90,14 @@ class AnnouncementDetail:
 
 def _clean_text(value: str) -> str:
     text = value.replace("\xa0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?<=\d)[ \t]+~[ \t]+(?=\d)", " ～ ", text)
     text = re.sub(r"(?<=\d)~(?=\d)", "～", text)
+    text = re.sub(r"(?<=[\u3400-\u9fff])~(?=\s*(?:\n|$))", "～", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = _WRAPPED_MARKDOWN_LINK_RE.sub(r"\g<link>", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()[:MAX_PLAIN_TEXT_LENGTH]
+    text = re.sub(r"\n{3,}", "\n\n", text).replace(_TABLE_CONTINUATION_TOKEN, "  ")
+    return text.strip()[:MAX_PLAIN_TEXT_LENGTH]
 
 
 def _absolute_http_url(value: object, base_url: str) -> str | None:
@@ -115,6 +121,94 @@ def _is_content_image(image: Tag, url: str) -> bool:
     return not any(marker in metadata for marker in _IMAGE_NOISE_MARKERS)
 
 
+def _direct_table_cells(row: Tag) -> list[Tag]:
+    return [cell for cell in row.find_all(("th", "td"), recursive=False)]
+
+
+def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:
+    """Render table rows as searchable, mobile-friendly text without losing columns."""
+    row_tags = [
+        row for row in table.find_all("tr") if row.find_parent("table") is table
+    ]
+    rows: list[tuple[list[Tag], list[str]]] = []
+    for row in row_tags:
+        cells = _direct_table_cells(row)
+        values = [_clean_text(render_cell(cell)) for cell in cells]
+        if cells and any(values):
+            rows.append((cells, values))
+    if not rows:
+        return ""
+
+    first_cells, first_values = rows[0]
+    nonempty_first_cells = [
+        cell for cell, value in zip(first_cells, first_values, strict=True) if value
+    ]
+    has_header = (
+        any(cell.name == "th" for cell in first_cells)
+        or any(cell.find_parent("thead") is not None for cell in first_cells)
+        or (
+            len(rows) > 1
+            and bool(nonempty_first_cells)
+            and all(
+                cell.find(("strong", "b")) is not None
+                for cell in nonempty_first_cells
+            )
+        )
+    )
+    headers = first_values if has_header else [
+        f"欄位{_TABLE_COLUMN_NAMES[index]}"
+        if index < len(_TABLE_COLUMN_NAMES)
+        else f"欄位{index + 1}"
+        for index in range(max(len(values) for _, values in rows))
+    ]
+    data_rows = (
+        [values for _, values in rows[1:]]
+        if has_header
+        else [values for _, values in rows]
+    )
+
+    normalized_headers = [re.sub(r"\s+", "", header) for header in headers]
+    reward_columns = {
+        name: normalized_headers.index(name)
+        for name in ("道具名稱", "數量", "期限")
+        if name in normalized_headers
+    }
+    if len(reward_columns) == 3:
+        reward_lines: list[str] = []
+        for values in data_rows:
+            try:
+                item_name = values[reward_columns["道具名稱"]]
+                quantity = values[reward_columns["數量"]]
+                duration = values[reward_columns["期限"]]
+            except IndexError:
+                continue
+            if not any((item_name, quantity, duration)):
+                continue
+            item_name = re.sub(r"\(([^()\n]+)\)", r"（\1）", item_name)
+            quantity = quantity if quantity.startswith("×") else f"×{quantity}"
+            reward_lines.append(f"• {item_name} {quantity}｜{duration}")
+        if reward_lines:
+            return "🎁 道具獎勵\n\n" + "\n".join(reward_lines)
+
+    generic_rows: list[str] = []
+    for values in data_rows:
+        fields = [
+            (headers[index], value)
+            for index, value in enumerate(values)
+            if index < len(headers) and value
+        ]
+        if not fields:
+            continue
+        first_header, first_value = fields[0]
+        row_lines = [f"• {first_header}：{first_value}"]
+        row_lines.extend(
+            f"{_TABLE_CONTINUATION_TOKEN}{header}：{value}"
+            for header, value in fields[1:]
+        )
+        generic_rows.append("\n".join(row_lines))
+    return "\n".join(generic_rows)
+
+
 def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
     """Walk DOM nodes in order, flushing text whenever a valid image is reached."""
     soup = BeautifulSoup(value, "html.parser")
@@ -130,11 +224,46 @@ def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
         if text:
             blocks.append(TextBlock(text))
 
+    def render_table_cell(cell: Tag) -> str:
+        parts: list[str] = []
+
+        def render(node: object) -> None:
+            if isinstance(node, NavigableString):
+                parts.append(str(node))
+                return
+            if not isinstance(node, Tag) or node.name == "img":
+                return
+            if node.name == "a":
+                label = node.get_text(" ", strip=True)
+                href = _absolute_http_url(node.get("href"), base_url)
+                if href and href not in seen_links:
+                    seen_links.add(href)
+                    links.append(href)
+                    parts.append(f"[{label or href}]({href})")
+                else:
+                    parts.append(label)
+                return
+            if node.name == "br":
+                parts.append("\n")
+                return
+            for child in node.children:
+                render(child)
+
+        render(cell)
+        return "".join(parts)
+
     def visit(node: object) -> None:
         if isinstance(node, NavigableString):
             text_parts.append(str(node))
             return
         if not isinstance(node, Tag):
+            return
+        if node.name == "table":
+            table_text = _format_table(node, render_table_cell)
+            if table_text:
+                if text_parts and not text_parts[-1].endswith("\n"):
+                    text_parts.append("\n")
+                text_parts.extend((table_text, "\n"))
             return
         if node.name == "img":
             image_url = _absolute_http_url(node.get("src"), base_url)
@@ -168,7 +297,9 @@ def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
     for child in soup.contents:
         visit(child)
     flush_text()
-    plain_text = _clean_text("\n".join(block.text for block in blocks if isinstance(block, TextBlock)))
+    plain_text = "\n".join(
+        block.text for block in blocks if isinstance(block, TextBlock)
+    ).strip()[:MAX_PLAIN_TEXT_LENGTH]
     images = tuple(block.url for block in blocks if isinstance(block, ImageBlock))
     return AnnouncementDetail(plain_text=plain_text, links=tuple(links), images=images, blocks=tuple(blocks))
 
