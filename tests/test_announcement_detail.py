@@ -87,6 +87,23 @@ FULL_PAGE_TEMPLATE = """
 </body></html>
 """
 
+ANNOUNCEMENT_82273_CONTENT = """
+<p>親愛的冒險者們：</p>
+<p>為了感謝各位冒險者對《新楓之谷：經典版》的支持與包容，營運團隊特別準備了「開服三日感恩回饋禮」。</p>
+<div>
+  <table><tbody>
+    <tr><td><p><strong>道具名稱</strong></p></td><td><p><strong>數量</strong></p></td><td><p><strong>期限</strong></p></td></tr>
+    <tr><td><p>經驗值1.5倍券(30分鐘)</p></td><td><p>2</p></td><td><p>14天</p></td></tr>
+    <tr><td><p>選擇欄位4格擴充券</p></td><td><p>1</p></td><td><p>14天</p></td></tr>
+    <tr><td><p>蛋糕</p></td><td><p>100</p></td><td><p>永久</p></td></tr>
+    <tr><td><p>回家卷軸</p></td><td><p>10</p></td><td><p>永久</p></td></tr>
+  </tbody></table>
+</div>
+<p>※獎勵領取時間：2026-07-31 ~ 2026-08-09 23:59</p>
+<p>敬祝各位冒險者們遊戲愉快～</p>
+<p>《新楓之谷：經典版》營運團隊 敬上</p>
+"""
+
 
 def page(content):
     return (
@@ -201,8 +218,115 @@ def test_html_fallback_removes_chrome_and_keeps_paragraph_list_date_and_table():
     )
     detail = fetch_announcement_detail(item(), timeout=1, user_agent="test", session=session)
 
-    assert detail.plain_text == "更新日期：2026/07/28\n正文一\n條件 A\n時間\n10:00"
+    assert detail.plain_text == "更新日期：2026/07/28\n正文一\n條件 A\n• 欄位一：時間\n  欄位二：10:00"
     assert all(value not in detail.plain_text for value in ("官方網站", "頁首", "導覽", "麵包屑", "側欄", "表單", "頁尾", "bad"))
+
+
+def test_82273_reward_table_keeps_rows_columns_and_following_text_in_dom_order():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {"content": ANNOUNCEMENT_82273_CONTENT}
+                        }
+                    },
+                }
+            )
+        ]
+    )
+
+    detail = fetch_announcement_detail(
+        Announcement(
+            "82273",
+            "活動",
+            "新楓之谷：經典版《0731(五)開服三日感恩回饋公告》",
+            "2026/07/31",
+            "https://maplestoryclassic.beanfun.com/bulletin?Bid=82273",
+        ),
+        timeout=1,
+        user_agent="test",
+        session=session,
+    )
+
+    expected_rows = (
+        "• 經驗值1.5倍券（30分鐘） ×2｜14天",
+        "• 選擇欄位4格擴充券 ×1｜14天",
+        "• 蛋糕 ×100｜永久",
+        "• 回家卷軸 ×10｜永久",
+    )
+    assert detail.plain_text.count("🎁 道具獎勵") == 1
+    assert "道具名稱" not in detail.plain_text
+    assert "\n數量\n" not in detail.plain_text
+    assert "\n期限\n" not in detail.plain_text
+    assert "道具名稱\n數量\n期限" not in detail.plain_text
+    assert "經驗值1.5倍券(30分鐘)\n2\n14天" not in detail.plain_text
+    assert all(detail.plain_text.count(row) == 1 for row in expected_rows)
+    positions = [detail.plain_text.index(row) for row in expected_rows]
+    assert positions == sorted(positions)
+    assert positions[-1] < detail.plain_text.index("※獎勵領取時間：2026-07-31 ～ 2026-08-09 23:59")
+    assert detail.plain_text.index("※獎勵領取時間") < detail.plain_text.index("敬祝各位冒險者們遊戲愉快")
+    assert detail.plain_text.index("敬祝各位冒險者們遊戲愉快") < detail.plain_text.index("《新楓之谷：經典版》營運團隊 敬上")
+    assert not session.get_calls
+
+
+def test_unknown_table_uses_generic_rows_and_keeps_links_clickable():
+    html = """
+    <p>表格前</p>
+    <table>
+      <tr><td>A</td><td><a href="/details">詳細資料</a></td><td>啟用</td></tr>
+      <tr><td>B</td><td>一般說明</td><td>停用</td></tr>
+    </table>
+    <p>表格後</p>
+    """
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+
+    assert (
+        "• 欄位一：A\n"
+        "  欄位二：[詳細資料](https://example.com/details)\n"
+        "  欄位三：啟用\n"
+        "• 欄位一：B\n"
+        "  欄位二：一般說明\n"
+        "  欄位三：停用"
+    ) in detail.plain_text
+    assert detail.plain_text.index("表格前") < detail.plain_text.index("• 欄位一：A")
+    assert detail.plain_text.index("• 欄位一：B") < detail.plain_text.index("表格後")
+    assert detail.links == ("https://example.com/details",)
+
+
+def test_unknown_table_uses_thead_labels_for_each_body_row():
+    html = """
+    <table>
+      <thead><tr><th>階段</th><th>時間</th><th>說明</th></tr></thead>
+      <tbody>
+        <tr><td>第一階段</td><td>10:00</td><td>開始</td></tr>
+        <tr><td>第二階段</td><td>12:00</td><td>結束</td></tr>
+      </tbody>
+    </table>
+    """
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+
+    assert detail.plain_text == (
+        "• 階段：第一階段\n"
+        "  時間：10:00\n"
+        "  說明：開始\n"
+        "• 階段：第二階段\n"
+        "  時間：12:00\n"
+        "  說明：結束"
+    )
+    assert detail.plain_text.count("• 階段：") == 2
 
 
 def test_full_page_template_without_approved_content_container_is_rejected():
