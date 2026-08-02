@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -27,6 +28,17 @@ MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
 MAX_DESCRIPTION_LENGTH = 4096
 MAX_CONTENT_EMBEDS = 10
+MAX_EMBED_TITLE_LENGTH = 256
+MAX_EMBED_FIELD_NAME_LENGTH = 256
+MAX_EMBED_FIELD_VALUE_LENGTH = 1024
+MAX_EMBED_FOOTER_LENGTH = 2048
+MAX_EMBED_AUTHOR_LENGTH = 256
+MAX_MESSAGE_EMBED_TEXT_LENGTH = 6000
+TARGET_DESCRIPTION_BODY_LENGTH = 3500
+TARGET_MESSAGE_BODY_TEXT_LENGTH = 5200
+MAX_RAW_ENTRIES_PER_MESSAGE = 8
+MAX_EMBED_FIELDS = 25
+LOGGER = logging.getLogger("maple-classic-discord-center")
 CATEGORY_COLORS = {
     "活動": 0xB53A2D,
     "更新": 0xD8B400,
@@ -246,6 +258,489 @@ def _public_image_urls(images: Sequence[str] | None) -> list[str]:
     return result
 
 
+def _logical_text_units(value: str) -> list[tuple[str, bool]]:
+    """Return lossless line units, keeping a table bullet with its continuation lines."""
+    lines = value.splitlines(keepends=True)
+    units: list[tuple[str, bool]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("• "):
+            row = line
+            index += 1
+            while index < len(lines) and lines[index].startswith("  "):
+                row += lines[index]
+                index += 1
+            units.append((row, True))
+            continue
+        units.append((line, False))
+        index += 1
+    return units
+
+
+def _safe_split_point(value: str, limit: int) -> int:
+    point = min(limit, len(value))
+    for match in _MARKDOWN_LINK_RE.finditer(value):
+        if match.start() < point < match.end():
+            if match.start() == 0:
+                raise DiscordSendError(
+                    "單一 Markdown 連結超過 Discord description 的安全分段長度。"
+                )
+            point = match.start()
+            break
+
+    lower_bound = max(1, point // 2)
+    boundaries = [
+        value.rfind(marker, lower_bound, point)
+        for marker in ("\n", "。", "！", "？", "；", "，", " ")
+    ]
+    boundary = max(boundaries, default=-1)
+    if boundary >= lower_bound:
+        point = boundary + 1
+
+    if (
+        0 < point < len(value)
+        and 0xD800 <= ord(value[point - 1]) <= 0xDBFF
+        and 0xDC00 <= ord(value[point]) <= 0xDFFF
+    ):
+        point -= 1
+    if point <= 0:
+        raise DiscordSendError("公告正文無法在安全字元邊界分段。")
+    return point
+
+
+def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
+    if len(value) <= TARGET_DESCRIPTION_BODY_LENGTH:
+        return [value]
+    if atomic:
+        raise DiscordSendError(
+            "單一表格資料列超過 Discord description 的安全分段長度。"
+        )
+
+    chunks: list[str] = []
+    remaining = value
+    while len(remaining) > TARGET_DESCRIPTION_BODY_LENGTH:
+        point = _safe_split_point(remaining, TARGET_DESCRIPTION_BODY_LENGTH)
+        chunks.append(remaining[:point])
+        remaining = remaining[point:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _formatted_text_entries(value: str) -> list[tuple[str, str]]:
+    formatted = _format_announcement_content(value)
+    if not formatted:
+        return []
+
+    entries: list[tuple[str, str]] = []
+    current = ""
+    for unit, atomic in _logical_text_units(formatted):
+        pieces = _split_text_unit(unit, atomic=atomic)
+        for piece in pieces:
+            if current and len(current) + len(piece) > TARGET_DESCRIPTION_BODY_LENGTH:
+                entries.append(("text", current))
+                current = ""
+            current += piece
+    if current:
+        entries.append(("text", current))
+    return entries
+
+
+def _ordered_content_entries(
+    *,
+    content: str | None,
+    images: Sequence[str] | None,
+    blocks: Sequence[AnnouncementContentBlock] | None,
+) -> tuple[list[tuple[str, str]], bool]:
+    entries: list[tuple[str, str]] = []
+    if blocks is not None:
+        for block in blocks:
+            if isinstance(block, TextBlock):
+                entries.extend(_formatted_text_entries(block.text))
+            elif isinstance(block, ImageBlock):
+                image_urls = _public_image_urls((block.url,))
+                if image_urls:
+                    entries.append(("image", image_urls[0]))
+    else:
+        if content and content.strip():
+            entries.extend(_formatted_text_entries(content))
+        entries.extend(
+            ("image", image_url) for image_url in _public_image_urls(images)
+        )
+    return entries, bool(entries)
+
+
+def _partition_content_entries(
+    entries: Sequence[tuple[str, str]],
+) -> list[list[tuple[str, str]]]:
+    if not entries:
+        return [[]]
+
+    pages: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_text_length = 0
+    for kind, value in entries:
+        added_text_length = len(value) if kind == "text" else 0
+        exceeds_text_budget = (
+            current
+            and current_text_length + added_text_length
+            > TARGET_MESSAGE_BODY_TEXT_LENGTH
+        )
+        exceeds_embed_budget = (
+            current and len(current) >= MAX_RAW_ENTRIES_PER_MESSAGE
+        )
+        if exceeds_text_budget or exceeds_embed_budget:
+            pages.append(current)
+            current = []
+            current_text_length = 0
+        current.append((kind, value))
+        current_text_length += added_text_length
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _footer_text(announcement: Announcement, *, history_mode: bool) -> str:
+    lines = ["Maple Classic Discord Center｜羽田製作"]
+    if history_mode:
+        lines.append("🏞️ 歷史公告")
+    lines.append(f"公告 ID：{announcement.announcement_id}")
+    return "\n".join(lines)
+
+
+def _payload_heading(
+    announcement: Announcement,
+    *,
+    chunk_index: int,
+    total_chunks: int,
+    has_body: bool,
+) -> str:
+    info_line = (
+        f"🏷️ 公告分類：{_normalize_category(announcement.category)}　　"
+        f"📅 公告日期：{announcement.date}"
+    )
+    if not has_body:
+        return f"{info_line}\n\n" if chunk_index == 1 else ""
+    content_heading = (
+        "📄 **公告內容**"
+        if total_chunks == 1
+        else f"📄 **公告內容（{chunk_index}/{total_chunks}）**"
+    )
+    if chunk_index == 1:
+        return f"{info_line}\n\n{content_heading}\n"
+    return f"{content_heading}\n"
+
+
+def _embed_text_length(embed: dict[str, object]) -> int:
+    total = 0
+    for key in ("title", "description"):
+        value = embed.get(key)
+        if isinstance(value, str):
+            total += len(value)
+    author = embed.get("author")
+    if isinstance(author, dict) and isinstance(author.get("name"), str):
+        total += len(author["name"])
+    footer = embed.get("footer")
+    if isinstance(footer, dict) and isinstance(footer.get("text"), str):
+        total += len(footer["text"])
+    fields = embed.get("fields")
+    if isinstance(fields, list):
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            for key in ("name", "value"):
+                value = field.get(key)
+                if isinstance(value, str):
+                    total += len(value)
+    return total
+
+
+def _payload_limit_error(
+    announcement: Announcement,
+    *,
+    chunk_index: int,
+    total_chunks: int,
+    reason: str,
+) -> DiscordSendError:
+    return DiscordSendError(
+        "Discord payload 發送前驗證失敗："
+        f"ID={announcement.announcement_id} "
+        f"chunk={chunk_index}/{total_chunks} reason={reason}"
+    )
+
+
+def validate_announcement_payloads(
+    announcement: Announcement,
+    payloads: Sequence[dict[str, object]],
+) -> None:
+    if not payloads:
+        raise _payload_limit_error(
+            announcement,
+            chunk_index=0,
+            total_chunks=0,
+            reason="沒有可發送的 webhook payload",
+        )
+
+    total_chunks = len(payloads)
+    for chunk_index, payload in enumerate(payloads, start=1):
+        if not isinstance(payload.get("username"), str):
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason="username 結構不正確",
+            )
+        allowed_mentions = payload.get("allowed_mentions")
+        if not isinstance(allowed_mentions, dict) or allowed_mentions.get("parse") != []:
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason="allowed_mentions 結構不正確",
+            )
+        embeds = payload.get("embeds")
+        if not isinstance(embeds, list) or not embeds or len(embeds) > MAX_CONTENT_EMBEDS:
+            embed_count = len(embeds) if isinstance(embeds, list) else 0
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason=f"Embed 數量={embed_count}，上限={MAX_CONTENT_EMBEDS}",
+            )
+
+        for embed_index, embed in enumerate(embeds, start=1):
+            if not isinstance(embed, dict):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} 結構不正確",
+                )
+            title = embed.get("title")
+            if title is not None and not isinstance(title, str):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} title 結構不正確",
+                )
+            if isinstance(title, str) and len(title) > MAX_EMBED_TITLE_LENGTH:
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} title 長度={len(title)}",
+                )
+            description = embed.get("description")
+            if description is not None and not isinstance(description, str):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} description 結構不正確",
+                )
+            if isinstance(description, str) and len(description) > MAX_DESCRIPTION_LENGTH:
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} description 長度={len(description)}",
+                )
+            author = embed.get("author")
+            if author is not None and not isinstance(author, dict):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} author 結構不正確",
+                )
+            if isinstance(author, dict):
+                author_name = author.get("name")
+                if not isinstance(author_name, str):
+                    raise _payload_limit_error(
+                        announcement,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        reason=f"Embed {embed_index} author name 結構不正確",
+                    )
+                if len(author_name) > MAX_EMBED_AUTHOR_LENGTH:
+                    raise _payload_limit_error(
+                        announcement,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        reason=f"Embed {embed_index} author 長度={len(author_name)}",
+                    )
+            footer = embed.get("footer")
+            if footer is not None and not isinstance(footer, dict):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} footer 結構不正確",
+                )
+            if isinstance(footer, dict):
+                footer_text = footer.get("text")
+                if not isinstance(footer_text, str):
+                    raise _payload_limit_error(
+                        announcement,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        reason=f"Embed {embed_index} footer text 結構不正確",
+                    )
+                if len(footer_text) > MAX_EMBED_FOOTER_LENGTH:
+                    raise _payload_limit_error(
+                        announcement,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        reason=f"Embed {embed_index} footer 長度={len(footer_text)}",
+                    )
+            image = embed.get("image")
+            if image is not None and (
+                not isinstance(image, dict)
+                or not isinstance(image.get("url"), str)
+            ):
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} image 結構不正確",
+                )
+            if title is None and description is None and image is None:
+                raise _payload_limit_error(
+                    announcement,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    reason=f"Embed {embed_index} 沒有可發送內容",
+                )
+            fields = embed.get("fields")
+            if fields is not None:
+                if not isinstance(fields, list) or len(fields) > MAX_EMBED_FIELDS:
+                    raise _payload_limit_error(
+                        announcement,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        reason=f"Embed {embed_index} fields 結構或數量不正確",
+                    )
+                for field_index, field in enumerate(fields, start=1):
+                    if not isinstance(field, dict):
+                        raise _payload_limit_error(
+                            announcement,
+                            chunk_index=chunk_index,
+                            total_chunks=total_chunks,
+                            reason=f"Embed {embed_index} field {field_index} 結構不正確",
+                        )
+                    name = field.get("name")
+                    value = field.get("value")
+                    if not isinstance(name, str) or len(name) > MAX_EMBED_FIELD_NAME_LENGTH:
+                        raise _payload_limit_error(
+                            announcement,
+                            chunk_index=chunk_index,
+                            total_chunks=total_chunks,
+                            reason=f"Embed {embed_index} field {field_index} name 超限",
+                        )
+                    if not isinstance(value, str) or len(value) > MAX_EMBED_FIELD_VALUE_LENGTH:
+                        raise _payload_limit_error(
+                            announcement,
+                            chunk_index=chunk_index,
+                            total_chunks=total_chunks,
+                            reason=f"Embed {embed_index} field {field_index} value 超限",
+                        )
+
+        message_text_length = sum(_embed_text_length(embed) for embed in embeds)
+        if message_text_length > MAX_MESSAGE_EMBED_TEXT_LENGTH:
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason=(
+                    f"Embed 總文字長度={message_text_length}，"
+                    f"上限={MAX_MESSAGE_EMBED_TEXT_LENGTH}"
+                ),
+            )
+
+
+def build_announcement_payloads(
+    announcement: Announcement,
+    *,
+    thumbnail_url: str | None = None,
+    content: str | None = None,
+    images: Sequence[str] | None = None,
+    blocks: Sequence[AnnouncementContentBlock] | None = None,
+    history_mode: bool = False,
+) -> list[dict[str, object]]:
+    """Build and preflight every webhook payload before the first network request."""
+    try:
+        thumbnail_url = validate_https_image_url(thumbnail_url)
+    except ValueError as exc:
+        raise DiscordSendError(str(exc)) from exc
+
+    _validate_content_safety(announcement, content=content, blocks=blocks)
+    entries, has_body = _ordered_content_entries(
+        content=content,
+        images=images,
+        blocks=blocks,
+    )
+    pages = _partition_content_entries(entries)
+    total_chunks = len(pages)
+    payloads: list[dict[str, object]] = []
+    category_color = get_category_color(announcement.category)
+
+    for chunk_index, page in enumerate(pages, start=1):
+        page_entries = list(page)
+        heading = _payload_heading(
+            announcement,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            has_body=has_body,
+        )
+        if page_entries and page_entries[0][0] == "text":
+            first_kind, first_value = page_entries[0]
+            page_entries[0] = (first_kind, f"{heading}{first_value}")
+        else:
+            page_entries.insert(0, ("text", heading))
+
+        embeds: list[dict[str, object]] = []
+        for kind, value in page_entries:
+            if kind == "image":
+                embeds.append({"image": {"url": value}})
+            else:
+                embeds.append({"color": category_color, "description": value})
+
+        if chunk_index == 1:
+            first_embed = embeds[0]
+            first_embed["author"] = {
+                "name": _truncate("新楓之谷：經典版官方消息", MAX_EMBED_AUTHOR_LENGTH)
+            }
+            first_embed["title"] = get_embed_title(
+                announcement.category, announcement.title
+            )
+            first_embed["url"] = announcement.url
+            if thumbnail_url:
+                first_embed["thumbnail"] = {"url": thumbnail_url}
+                first_embed["author"]["icon_url"] = thumbnail_url
+
+        if chunk_index == total_chunks:
+            if "image" in embeds[-1]:
+                embeds.append({"color": category_color, "description": "\u200b"})
+            embeds[-1]["footer"] = {
+                "text": _footer_text(announcement, history_mode=history_mode)
+            }
+            if thumbnail_url:
+                embeds[-1]["footer"]["icon_url"] = thumbnail_url
+
+        payloads.append(
+            {
+                "username": "Maple Classic Bot",
+                "embeds": embeds,
+                "allowed_mentions": {"parse": []},
+            }
+        )
+
+    validate_announcement_payloads(announcement, payloads)
+    return payloads
+
+
 def _validate_content_safety(
     announcement: Announcement,
     *,
@@ -392,6 +887,69 @@ def _retry_after(response: object, fallback: float) -> float:
     return min(fallback, MAX_RETRY_AFTER_SECONDS)
 
 
+def _discord_message_id(response: object) -> str | None:
+    try:
+        payload = response.json()
+    except (AttributeError, TypeError, ValueError, requests.RequestException):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message_id = payload.get("id")
+    return str(message_id) if message_id is not None else None
+
+
+def _send_payload(
+    client: object,
+    *,
+    webhook_url: str,
+    payload: dict[str, object],
+    user_agent: str,
+    timeout: float,
+    sleep: Callable[[float], None],
+) -> str | None:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.post(
+                webhook_url,
+                params={"wait": "true"},
+                json=payload,
+                headers={"User-Agent": user_agent},
+                timeout=timeout,
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is None:
+                response.raise_for_status()
+                return _discord_message_id(response)
+            if 200 <= status_code < 300:
+                return _discord_message_id(response)
+            retryable = status_code == 429 or status_code in {500, 502, 503, 504}
+            if not retryable:
+                raise DiscordSendError(
+                    f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
+                )
+            error = DiscordSendError(
+                f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
+            )
+            delay = (
+                _retry_after(response, float(2 ** (attempt - 1)))
+                if status_code == 429
+                else float(2 ** (attempt - 1))
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            error = DiscordSendError("Discord Webhook 發送失敗：連線或 timeout 錯誤。")
+            delay = float(2 ** (attempt - 1))
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            raise DiscordSendError(
+                f"Discord Webhook 發送失敗：請求錯誤{_response_detail(response, webhook_url)}"
+            ) from exc
+
+        if attempt == MAX_ATTEMPTS:
+            raise error
+        sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
+    raise DiscordSendError("Discord Webhook 發送失敗：已超過重試次數。")
+
+
 def send_announcement(
     webhook_url: str,
     announcement: Announcement,
@@ -411,116 +969,63 @@ def send_announcement(
         raise DiscordSendError("缺少 DISCORD_WEBHOOK_URL，無法發送公告。")
     _validate_webhook_url(webhook_url)
     try:
-        thumbnail_url = validate_https_image_url(thumbnail_url)
-    except ValueError as exc:
-        raise DiscordSendError(str(exc)) from exc
-    try:
         validate_discord_spacer_emoji(spacer_emoji)
     except ValueError as exc:
         raise DiscordSendError(str(exc)) from exc
 
-    _validate_content_safety(
+    payloads = build_announcement_payloads(
         announcement,
+        thumbnail_url=thumbnail_url,
         content=content,
+        images=images,
         blocks=blocks,
+        history_mode=history_mode,
     )
-
-    if blocks is not None:
-        entries = format_content_entries(announcement, blocks)
-    else:
-        descriptions = (
-            format_content_descriptions(announcement, content)
-            if content and content.strip()
-            else [format_description(announcement)]
-        )
-        entries = [("text", description) for description in descriptions]
-        entries.extend(("image", image_url) for image_url in _public_image_urls(images))
-
-    if len(entries) > MAX_CONTENT_EMBEDS:
-        entries = entries[: MAX_CONTENT_EMBEDS - 1] + [
-            ("text", "內容過長，其餘內容與圖片請至公告原文查看")
-        ]
-    elif entries[-1][0] == "image":
-        if len(entries) == MAX_CONTENT_EMBEDS:
-            entries[-1] = ("text", "內容過長，其餘內容與圖片請至公告原文查看")
-        else:
-            entries.append(("text", "\u200b"))
-
-    footer_lines = ["Maple Classic Discord Center｜羽田製作"]
-    if history_mode:
-        footer_lines.append("🏞️ 歷史公告")
-    footer_lines.append(f"公告 ID：{announcement.announcement_id}")
-    first_kind, first_value = entries[0]
-    if first_kind != "text":
-        raise DiscordSendError("公告內容缺少可用文字區塊")
-    embed = {
-        "author": {"name": _truncate("新楓之谷：經典版官方消息", 256)},
-        "title": get_embed_title(announcement.category, announcement.title),
-        "url": announcement.url,
-        "color": get_category_color(announcement.category),
-        "description": first_value,
-    }
-    if thumbnail_url:
-        embed["thumbnail"] = {"url": thumbnail_url}
-        embed["author"]["icon_url"] = thumbnail_url
-
-    embeds = [embed]
-    for kind, value in entries[1:]:
-        if kind == "image":
-            embeds.append({"image": {"url": value}})
-            continue
-        embeds.append(
-            {
-                "color": get_category_color(announcement.category),
-                "description": value,
-            }
-        )
-    embeds[-1]["footer"] = {"text": _truncate("\n".join(footer_lines), 2048)}
-    if thumbnail_url:
-        embeds[-1]["footer"]["icon_url"] = thumbnail_url
-    payload = {
-        "username": "Maple Classic Bot",
-        "embeds": embeds,
-        "allowed_mentions": {"parse": []},
-    }
+    validate_announcement_payloads(announcement, payloads)
     client = session or requests.Session()
     owns_session = session is None
     try:
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        total_chunks = len(payloads)
+        for chunk_index, payload in enumerate(payloads, start=1):
+            embeds = payload["embeds"]
+            text_length = sum(_embed_text_length(embed) for embed in embeds)
+            LOGGER.info(
+                "Sending Discord chunk: ID=%s chunk=%d/%d embeds=%d text_length=%d",
+                announcement.announcement_id,
+                chunk_index,
+                total_chunks,
+                len(embeds),
+                text_length,
+            )
             try:
-                response = client.post(
-                    webhook_url,
-                    json=payload,
-                    headers={"User-Agent": user_agent},
+                message_id = _send_payload(
+                    client,
+                    webhook_url=webhook_url,
+                    payload=payload,
+                    user_agent=user_agent,
                     timeout=timeout,
+                    sleep=sleep,
                 )
-                status_code = getattr(response, "status_code", None)
-                if status_code is None:
-                    response.raise_for_status()
-                    return
-                if 200 <= status_code < 300:
-                    return
-                retryable = status_code == 429 or status_code in {500, 502, 503, 504}
-                if not retryable:
-                    raise DiscordSendError(
-                        f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
-                    )
-                error = DiscordSendError(
-                    f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
+            except DiscordSendError as exc:
+                LOGGER.error(
+                    "Discord chunk failed: ID=%s chunk=%d/%d reason=%s",
+                    announcement.announcement_id,
+                    chunk_index,
+                    total_chunks,
+                    exc,
                 )
-                delay = _retry_after(response, float(2 ** (attempt - 1))) if status_code == 429 else float(2 ** (attempt - 1))
-            except (requests.ConnectionError, requests.Timeout) as exc:
-                error = DiscordSendError("Discord Webhook 發送失敗：連線或 timeout 錯誤。")
-                delay = float(2 ** (attempt - 1))
-            except requests.RequestException as exc:
-                response = getattr(exc, "response", None)
                 raise DiscordSendError(
-                    f"Discord Webhook 發送失敗：請求錯誤{_response_detail(response, webhook_url)}"
+                    "Discord Webhook 分段發送失敗："
+                    f"ID={announcement.announcement_id} "
+                    f"chunk={chunk_index}/{total_chunks} {exc}"
                 ) from exc
-
-            if attempt == MAX_ATTEMPTS:
-                raise error
-            sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
+            LOGGER.info(
+                "Discord chunk success: ID=%s chunk=%d/%d message_id=%s",
+                announcement.announcement_id,
+                chunk_index,
+                total_chunks,
+                message_id or "unavailable",
+            )
     finally:
         if owns_session:
             client.close()

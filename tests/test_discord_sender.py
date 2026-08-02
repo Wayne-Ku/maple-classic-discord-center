@@ -1,14 +1,22 @@
 ﻿import pytest
 import requests
+import re
 
 from announcement_detail import ImageBlock, TextBlock
 from discord_sender import (
     DiscordSendError,
+    MAX_CONTENT_EMBEDS,
+    MAX_DESCRIPTION_LENGTH,
+    MAX_EMBED_FIELD_VALUE_LENGTH,
+    MAX_MESSAGE_EMBED_TEXT_LENGTH,
+    _embed_text_length,
     _format_announcement_content,
+    build_announcement_payloads,
     format_content_descriptions,
     get_category_color,
     get_category_display,
     send_announcement,
+    validate_announcement_payloads,
 )
 from maple_parser import Announcement
 
@@ -181,6 +189,258 @@ class FakeSession:
 
 def announcement(title="標題", category="重要", date="2026/07/23", url="https://example.com/1"):
     return Announcement("1", category, title, date, url)
+
+
+def reconstructed_payload_body(payloads):
+    pieces = []
+    heading_pattern = re.compile(
+        r"📄 \*\*公告內容(?:（\d+/\d+）)?\*\*\n"
+    )
+    for payload in payloads:
+        for embed in payload["embeds"]:
+            description = embed.get("description")
+            if not description or description == "\u200b":
+                continue
+            if match := heading_pattern.search(description):
+                description = description[match.end() :]
+            pieces.append(description)
+    return "".join(pieces)
+
+
+def long_sanction_content(row_count=500):
+    rows = "\n".join(
+        f"• 角色名稱：測試角色{index:04d}\n  制裁結果：永久鎖定"
+        for index in range(row_count)
+    )
+    return (
+        "親愛的冒險者們：\n"
+        "以下為遊戲異常行為制裁名單。\n"
+        f"{rows}\n"
+        "營運團隊重申與叮嚀：\n"
+        "請冒險者切勿使用任何非官方授權之輔助程式。\n"
+        "《新楓之谷：經典版》營運團隊 敬上"
+    )
+
+
+def test_82279_long_body_builds_multiple_legal_lossless_payloads():
+    item = Announcement(
+        "82279",
+        "重要",
+        "新楓之谷：經典版《0802(日)遊戲異常行為制裁公告》",
+        "2026/08/02",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82279",
+    )
+    content = long_sanction_content()
+    payloads = build_announcement_payloads(
+        item,
+        blocks=(TextBlock(content),),
+    )
+
+    assert len(content) > 6000
+    assert len(payloads) > 1
+    validate_announcement_payloads(item, payloads)
+    assert reconstructed_payload_body(payloads) == _format_announcement_content(content)
+
+    all_embeds = [embed for payload in payloads for embed in payload["embeds"]]
+    descriptions = [
+        embed.get("description", "")
+        for embed in all_embeds
+        if embed.get("description")
+    ]
+    for chunk_index, payload in enumerate(payloads, start=1):
+        embeds = payload["embeds"]
+        assert len(embeds) <= MAX_CONTENT_EMBEDS
+        assert sum(_embed_text_length(embed) for embed in embeds) <= MAX_MESSAGE_EMBED_TEXT_LENGTH
+        assert all(
+            len(embed.get("description", "")) <= MAX_DESCRIPTION_LENGTH
+            for embed in embeds
+        )
+        combined = "\n".join(embed.get("description", "") for embed in embeds)
+        assert f"公告內容（{chunk_index}/{len(payloads)}）" in combined
+
+    assert "title" in payloads[0]["embeds"][0]
+    assert "author" in payloads[0]["embeds"][0]
+    assert "公告分類：重要" in payloads[0]["embeds"][0]["description"]
+    assert all(
+        "title" not in embed and "author" not in embed
+        for payload in payloads[1:]
+        for embed in payload["embeds"]
+    )
+    assert all(
+        "公告分類：" not in embed.get("description", "")
+        for payload in payloads[1:]
+        for embed in payload["embeds"]
+    )
+    assert all(
+        "footer" not in embed
+        for payload in payloads[:-1]
+        for embed in payload["embeds"]
+    )
+    assert payloads[-1]["embeds"][-1]["footer"]["text"].endswith(
+        "公告 ID：82279"
+    )
+
+    for index in (0, 1, 249, 499):
+        row = f"• 角色名稱：測試角色{index:04d}\n  制裁結果：永久鎖定"
+        assert sum(row in description for description in descriptions) == 1
+
+
+def test_long_payloads_preserve_text_and_image_block_order():
+    first_image = "https://cdn.example.com/first.jpg"
+    second_image = "https://cdn.example.com/second.jpg"
+    blocks = (
+        TextBlock("圖片前\n" + "長段落內容。" * 800),
+        ImageBlock(first_image),
+        TextBlock("圖片間文字"),
+        ImageBlock(second_image),
+        TextBlock("最後文字"),
+    )
+    payloads = build_announcement_payloads(announcement(), blocks=blocks)
+    flattened = [embed for payload in payloads for embed in payload["embeds"]]
+    first_index = next(
+        index
+        for index, embed in enumerate(flattened)
+        if embed.get("image", {}).get("url") == first_image
+    )
+    second_index = next(
+        index
+        for index, embed in enumerate(flattened)
+        if embed.get("image", {}).get("url") == second_image
+    )
+
+    assert first_index < second_index
+    assert "圖片前" in "".join(
+        embed.get("description", "") for embed in flattened[:first_index]
+    )
+    assert "圖片間文字" in "".join(
+        embed.get("description", "")
+        for embed in flattened[first_index + 1 : second_index]
+    )
+    assert "最後文字" in "".join(
+        embed.get("description", "") for embed in flattened[second_index + 1 :]
+    )
+    assert all("footer" not in embed for embed in flattened[:-1])
+    assert flattened[-1]["footer"]["text"].endswith("公告 ID：1")
+
+
+def test_long_payload_split_keeps_markdown_link_and_chinese_text_intact():
+    link = "[客服中心](https://support.example.com/very/long/path)"
+    content = "這是長篇公告內容。" * 450 + f"\n{link}\n" + "後續中文內容。" * 450
+    payloads = build_announcement_payloads(
+        announcement(), blocks=(TextBlock(content),)
+    )
+    descriptions = [
+        embed.get("description", "")
+        for payload in payloads
+        for embed in payload["embeds"]
+    ]
+
+    assert sum(link in description for description in descriptions) == 1
+    assert reconstructed_payload_body(payloads) == _format_announcement_content(content)
+
+
+def test_preflight_rejects_message_total_over_6000():
+    payload = {
+        "username": "Maple Classic Bot",
+        "embeds": [
+            {"description": "a" * 3000},
+            {"description": "b" * 3000, "title": "超限"},
+        ],
+        "allowed_mentions": {"parse": []},
+    }
+
+    with pytest.raises(DiscordSendError, match="Embed 總文字長度") as error:
+        validate_announcement_payloads(announcement(), [payload])
+
+    assert "ID=1" in str(error.value)
+    assert "chunk=1/1" in str(error.value)
+
+
+def test_preflight_rejects_oversized_field_value():
+    payload = {
+        "username": "Maple Classic Bot",
+        "embeds": [
+            {
+                "description": "正文",
+                "fields": [
+                    {"name": "欄位", "value": "x" * (MAX_EMBED_FIELD_VALUE_LENGTH + 1)}
+                ],
+            }
+        ],
+        "allowed_mentions": {"parse": []},
+    }
+
+    with pytest.raises(DiscordSendError, match="field 1 value 超限"):
+        validate_announcement_payloads(announcement(), [payload])
+
+
+def test_send_preflights_all_payloads_before_first_webhook_request(monkeypatch):
+    invalid_payload = {
+        "username": "Maple Classic Bot",
+        "embeds": [{"description": "x" * (MAX_DESCRIPTION_LENGTH + 1)}],
+        "allowed_mentions": {"parse": []},
+    }
+    monkeypatch.setattr(
+        "discord_sender.build_announcement_payloads",
+        lambda *_args, **_kwargs: [invalid_payload],
+    )
+    session = FakeSession([])
+
+    with pytest.raises(DiscordSendError, match="發送前驗證失敗"):
+        send_announcement(WEBHOOK, announcement(), user_agent="test", session=session)
+
+    assert session.calls == []
+
+
+def test_multi_payload_send_logs_message_ids_and_stops_at_failed_chunk(caplog):
+    content = long_sanction_content(260)
+    payloads = build_announcement_payloads(
+        announcement(), blocks=(TextBlock(content),)
+    )
+    assert len(payloads) > 1
+    session = FakeSession(
+        [FakeResponse(200, json_body={"id": "first-message"}), FakeResponse(400)]
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(DiscordSendError, match="chunk=2/"):
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            blocks=(TextBlock(content),),
+            session=session,
+        )
+
+    assert len(session.calls) == 2
+    assert all(call[1]["params"] == {"wait": "true"} for call in session.calls)
+    assert "message_id=first-message" in caplog.text
+    assert "Discord chunk failed" in caplog.text
+
+
+def test_all_chunks_are_sent_once_and_each_success_message_id_is_logged(caplog):
+    content = long_sanction_content(260)
+    payloads = build_announcement_payloads(
+        announcement(), blocks=(TextBlock(content),)
+    )
+    session = FakeSession(
+        [
+            FakeResponse(200, json_body={"id": f"message-{index}"})
+            for index in range(1, len(payloads) + 1)
+        ]
+    )
+
+    with caplog.at_level("INFO"):
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            blocks=(TextBlock(content),),
+            session=session,
+        )
+
+    assert len(session.calls) == len(payloads)
+    for index in range(1, len(payloads) + 1):
+        assert f"message_id=message-{index}" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -637,17 +897,28 @@ def test_last_image_block_adds_a_footer_only_closing_embed():
     assert embeds[2]["footer"]["text"].endswith("公告 ID：1")
 
 
-def test_ordered_blocks_are_capped_at_ten_embeds_with_a_notice():
-    session = FakeSession([FakeResponse(204)])
+def test_more_than_ten_ordered_embeds_continue_in_a_second_payload_without_loss():
+    session = FakeSession([FakeResponse(204), FakeResponse(204)])
     blocks = (TextBlock("body"),) + tuple(ImageBlock(f"https://cdn.example.com/{index}.jpg") for index in range(12))
     send_announcement(WEBHOOK, announcement(), user_agent="test", blocks=blocks, session=session)
 
-    embeds = session.calls[0][1]["json"]["embeds"]
-    assert len(embeds) == 10
-    assert "body" in embeds[0]["description"]
-    assert embeds[1] == {"image": {"url": "https://cdn.example.com/0.jpg"}}
-    assert "description" in embeds[-1]
-    assert "image" not in embeds[-1]
+    payloads = [call[1]["json"] for call in session.calls]
+    assert len(payloads) == 2
+    assert all(len(payload["embeds"]) <= MAX_CONTENT_EMBEDS for payload in payloads)
+    assert "body" in payloads[0]["embeds"][0]["description"]
+    image_urls = [
+        embed["image"]["url"]
+        for payload in payloads
+        for embed in payload["embeds"]
+        if "image" in embed
+    ]
+    assert image_urls == [f"https://cdn.example.com/{index}.jpg" for index in range(12)]
+    assert all(
+        "footer" not in embed
+        for payload in payloads[:-1]
+        for embed in payload["embeds"]
+    )
+    assert payloads[-1]["embeds"][-1]["footer"]["text"].endswith("公告 ID：1")
 
 
 def test_long_text_block_splits_before_its_following_image_and_trailing_text():

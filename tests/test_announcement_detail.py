@@ -105,6 +105,22 @@ ANNOUNCEMENT_82273_CONTENT = """
 """
 
 
+def announcement_82279_content(row_count=450):
+    rows = "".join(
+        f"<tr><td>測試角色{index:04d}</td><td>永久鎖定</td></tr>"
+        for index in range(row_count)
+    )
+    return (
+        "<p>親愛的冒險者們：</p>"
+        "<p>以下為遊戲異常行為制裁名單。</p>"
+        "<table><thead><tr><th>角色名稱</th><th>制裁結果</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+        "<p>營運團隊重申與叮嚀：</p>"
+        "<p>請冒險者切勿使用任何非官方授權之輔助程式。</p>"
+        "<p>《新楓之谷：經典版》營運團隊 敬上</p>"
+    )
+
+
 def page(content):
     return (
         "<html><head><title>新楓之谷：經典版官方網站</title></head>"
@@ -126,6 +142,85 @@ def test_detail_api_table_content_is_preferred_without_html_fallback(caplog):
     assert session.closed is False
     assert "Detail API success" in caplog.text
     assert "HTML Fallback=False" in caplog.text
+
+
+def test_82279_detail_api_html_fragment_is_parsed_without_container_or_fallback(caplog):
+    content = announcement_82279_content()
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {"table": {"content": content}}
+                    },
+                }
+            )
+        ]
+    )
+    announcement = Announcement(
+        "82279",
+        "重要",
+        "新楓之谷：經典版《0802(日)遊戲異常行為制裁公告》",
+        "2026/08/02",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82279",
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            announcement,
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert len(detail.plain_text) > 6000
+    assert detail.plain_text.startswith("親愛的冒險者們：")
+    assert "• 角色名稱：測試角色0000\n  制裁結果：永久鎖定" in detail.plain_text
+    assert "• 角色名稱：測試角色0449\n  制裁結果：永久鎖定" in detail.plain_text
+    assert detail.plain_text.endswith("《新楓之谷：經典版》營運團隊 敬上")
+    assert not session.get_calls
+    assert "Detail API Content Field=data.myDataSet.table.content" in caplog.text
+    assert "Detail API Content Type=HTML fragment" in caplog.text
+    assert f"Detail API Content Length={len(content)}" in caplog.text
+    assert "HTML selector=fragment-root" in caplog.text
+    assert "HTML extracted length=0" not in caplog.text
+    assert "HTML Fallback=False" in caplog.text
+
+
+def test_detail_api_full_page_uses_approved_content_container():
+    session = Session(
+        [
+            Response(
+                {
+                    "data": {
+                        "content": page("<p>完整頁面中的合法公告正文</p>")
+                    }
+                }
+            )
+        ]
+    )
+
+    detail = fetch_announcement_detail(
+        item(), timeout=1, user_agent="test", session=session
+    )
+
+    assert detail.plain_text == "完整頁面中的合法公告正文"
+    assert not session.get_calls
+
+
+def test_detail_api_full_page_without_approved_container_is_not_sent_as_body():
+    session = Session(
+        [Response({"data": {"content": FULL_PAGE_TEMPLATE}})],
+        [Response(text=FULL_PAGE_TEMPLATE)],
+    )
+
+    with pytest.raises(AnnouncementDetailError):
+        fetch_announcement_detail(
+            item(), timeout=1, user_agent="test", session=session
+        )
+
+    assert len(session.get_calls) == 1
 
 
 def test_short_detail_api_body_is_valid_and_does_not_fallback():
@@ -385,10 +480,10 @@ def test_external_session_is_not_closed_and_internal_session_is_closed(monkeypat
     assert internal.closed is True
 
 
-def test_body_length_is_safely_limited():
+def test_body_over_safe_parser_limit_fails_instead_of_silent_truncation():
     session = Session([Response({"data": {"content": "<p>" + "x" * (MAX_PLAIN_TEXT_LENGTH + 50) + "</p>"}})])
-    detail = fetch_announcement_detail(item(), timeout=1, user_agent="test", session=session)
-    assert len(detail.plain_text) == MAX_PLAIN_TEXT_LENGTH
+    with pytest.raises(AnnouncementDetailError, match="exceeds the safe parser limit"):
+        fetch_announcement_detail(item(), timeout=1, user_agent="test", session=session)
 
 
 def test_html_anchors_become_markdown_and_duplicate_urls_are_removed():
