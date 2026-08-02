@@ -16,7 +16,7 @@ from maple_parser import Announcement
 
 DETAIL_API_URL = "https://maplestoryclassic.beanfun.com/api/Bulletin/BulletinDetail"
 LEGACY_NEWS_API_URL = "https://gamaapi.beanfun.com/Api/News/GetNewsContent"
-MAX_PLAIN_TEXT_LENGTH = 20_000
+MAX_PLAIN_TEXT_LENGTH = 100_000
 LOGGER = logging.getLogger("maple-classic-discord-center")
 
 _NON_BODY_TEXT = frozenset({"新楓之谷：經典版官方網站", "新楓之谷：經典版", "MapleStory Classic Official Website"})
@@ -97,7 +97,7 @@ def _clean_text(value: str) -> str:
     text = re.sub(r" *\n *", "\n", text)
     text = _WRAPPED_MARKDOWN_LINK_RE.sub(r"\g<link>", text)
     text = re.sub(r"\n{3,}", "\n\n", text).replace(_TABLE_CONTINUATION_TOKEN, "  ")
-    return text.strip()[:MAX_PLAIN_TEXT_LENGTH]
+    return text.strip()
 
 
 def _absolute_http_url(value: object, base_url: str) -> str | None:
@@ -299,7 +299,12 @@ def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
     flush_text()
     plain_text = "\n".join(
         block.text for block in blocks if isinstance(block, TextBlock)
-    ).strip()[:MAX_PLAIN_TEXT_LENGTH]
+    ).strip()
+    if len(plain_text) > MAX_PLAIN_TEXT_LENGTH:
+        raise AnnouncementDetailError(
+            "Official announcement content exceeds the safe parser limit "
+            f"of {MAX_PLAIN_TEXT_LENGTH} characters"
+        )
     images = tuple(block.url for block in blocks if isinstance(block, ImageBlock))
     return AnnouncementDetail(plain_text=plain_text, links=tuple(links), images=images, blocks=tuple(blocks))
 
@@ -333,31 +338,71 @@ def _usable_detail(detail: AnnouncementDetail) -> AnnouncementDetail | None:
     return detail
 
 
-def _json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
+def _content_kind(value: str) -> str:
+    soup = BeautifulSoup(value, "html.parser")
+    if soup.find(("html", "body")) is not None or re.search(
+        r"<!doctype\s+html", value, flags=re.IGNORECASE
+    ):
+        return "full HTML page"
+    if soup.find() is not None:
+        return "HTML fragment"
+    return "plain text"
+
+
+def _parse_content_value(
+    value: str, *, base_url: str
+) -> tuple[AnnouncementDetail | None, str, str]:
+    kind = _content_kind(value)
+    if kind == "full HTML page":
+        detail, selector = _html_detail(value, base_url=base_url)
+        return detail, kind, selector
+    if is_template_garbage(value):
+        return None, kind, "rejected-template"
+    detail = _usable_detail(_detail_from_html(value, base_url=base_url))
+    selector = "fragment-root" if kind == "HTML fragment" else "plain-text-root"
+    return detail, kind, selector
+
+
+def _json_detail_with_source(
+    payload: Any, *, base_url: str
+) -> tuple[AnnouncementDetail, str, int, str, str] | None:
     if not isinstance(payload, dict) or payload.get("code") not in (None, 1, "1"):
         return None
-    candidates: list[dict[str, Any]] = [payload]
+    candidates: list[tuple[str, dict[str, Any]]] = [("root", payload)]
     data = payload.get("data")
     if isinstance(data, dict):
-        candidates.append(data)
+        candidates.append(("data", data))
         dataset = data.get("myDataSet")
         if isinstance(dataset, dict):
-            candidates.append(dataset)
+            candidates.append(("data.myDataSet", dataset))
             table = dataset.get("table")
             if isinstance(table, dict):
-                candidates.append(table)
+                candidates.append(("data.myDataSet.table", table))
         for key in ("bulletin", "detail", "result"):
             nested = data.get(key)
             if isinstance(nested, dict):
-                candidates.append(nested)
-    for candidate in candidates:
+                candidates.append((f"data.{key}", nested))
+    for candidate_path, candidate in candidates:
         for key in ("content", "contentHtml", "html", "body", "bulletinContent"):
             value = candidate.get(key)
             if isinstance(value, str) and value.strip():
-                detail = _usable_detail(_detail_from_html(value, base_url=base_url))
+                detail, kind, selector = _parse_content_value(
+                    value, base_url=base_url
+                )
                 if detail:
-                    return detail
+                    return (
+                        detail,
+                        f"{candidate_path}.{key}",
+                        len(value),
+                        kind,
+                        selector,
+                    )
     return None
+
+
+def _json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
+    result = _json_detail_with_source(payload, base_url=base_url)
+    return result[0] if result else None
 
 
 def _legacy_news_parameters(url: str) -> tuple[str, str] | None:
@@ -384,7 +429,8 @@ def _legacy_json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | 
     contents = result_data.get("Contents")
     if not isinstance(contents, str) or not contents.strip():
         return None
-    return _usable_detail(_detail_from_html(contents, base_url=base_url))
+    detail, _, _ = _parse_content_value(contents, base_url=base_url)
+    return detail
 
 
 def _html_detail(html: str, *, base_url: str) -> tuple[AnnouncementDetail | None, str]:
@@ -422,15 +468,22 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
             response = client.post(DETAIL_API_URL, params={"pbid": announcement.announcement_id}, headers=headers, timeout=timeout)
             LOGGER.info("Detail API HTTP Status Code=%s", getattr(response, "status_code", "unknown"))
             response.raise_for_status()
-            detail = _json_detail(response.json(), base_url=announcement.url)
-            LOGGER.info("Detail API Content Length=%d", len(detail.plain_text if detail else ""))
-            if detail:
+            result = _json_detail_with_source(
+                response.json(), base_url=announcement.url
+            )
+            if result:
+                detail, field_path, raw_length, content_kind, selector = result
+                LOGGER.info("Detail API Content Field=%s", field_path)
+                LOGGER.info("Detail API Content Type=%s", content_kind)
+                LOGGER.info("Detail API Content Length=%d", raw_length)
+                LOGGER.info("Detail API Parsed Text Length=%d", len(detail.plain_text))
                 LOGGER.info("Detail API success")
                 LOGGER.info("HTML Fallback=False")
-                LOGGER.info("HTML selector=.bulletin-detail__content")
-                LOGGER.info("HTML extracted length=0")
+                LOGGER.info("HTML selector=%s", selector)
+                LOGGER.info("HTML extracted length=%d", len(detail.plain_text))
                 LOGGER.info("Final sent content length=%d", len(detail.plain_text))
                 return detail
+            LOGGER.info("Detail API Content Length=0")
         except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
             LOGGER.info("Detail API unavailable: %s", type(exc).__name__)
 

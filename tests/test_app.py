@@ -288,3 +288,62 @@ def test_second_send_failure_keeps_first_successful_state(monkeypatch, tmp_path)
         app.run(make_config(path))
     assert calls == ["2", "3"]
     assert load_sent_ids(path) == {"1", "2"}
+
+
+def test_82279_partial_chunk_failure_is_not_recorded(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["82278"]}',
+        encoding="utf-8",
+    )
+    item = Announcement(
+        "82279",
+        "重要",
+        "新楓之谷：經典版《0802(日)遊戲異常行為制裁公告》",
+        "2026/08/02",
+        "https://x/82279",
+    )
+    monkeypatch.setattr(app, "fetch_announcements", lambda **_kwargs: [item])
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            app.DiscordSendError("chunk=2/8 failed")
+        ),
+    )
+
+    with pytest.raises(app.DiscordSendError, match="chunk=2/8"):
+        app.run(make_config(path))
+
+    assert load_sent_ids(path) == {"82278"}
+
+
+def test_82279_is_recorded_only_after_complete_send_and_not_sent_again(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["82278"]}',
+        encoding="utf-8",
+    )
+    item = Announcement(
+        "82279",
+        "重要",
+        "新楓之谷：經典版《0802(日)遊戲異常行為制裁公告》",
+        "2026/08/02",
+        "https://x/82279",
+    )
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **_kwargs: [item])
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda _url, announcement, **_kwargs: calls.append(
+            announcement.announcement_id
+        ),
+    )
+
+    assert app.run(make_config(path)) == 0
+    assert load_sent_ids(path) == {"82278", "82279"}
+    assert app.run(make_config(path)) == 0
+    assert calls == ["82279"]
