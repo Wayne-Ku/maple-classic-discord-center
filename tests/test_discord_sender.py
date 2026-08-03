@@ -285,6 +285,51 @@ def test_82279_long_body_builds_multiple_legal_lossless_payloads():
         assert sum(row in description for description in descriptions) == 1
 
 
+def test_82289_scale_body_builds_legal_lossless_payloads():
+    item = Announcement(
+        "82289",
+        "重要",
+        "新楓之谷：經典版《0803(一)遊戲異常行為制裁公告》",
+        "2026/08/03",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82289",
+    )
+    content = long_sanction_content(15_805)
+
+    payloads = build_announcement_payloads(item, blocks=(TextBlock(content),))
+
+    assert len(content) > 100_000
+    assert len(payloads) > 100
+    validate_announcement_payloads(item, payloads)
+    assert reconstructed_payload_body(payloads) == _format_announcement_content(content)
+    assert all(
+        len(payload["embeds"]) <= MAX_CONTENT_EMBEDS
+        and sum(_embed_text_length(embed) for embed in payload["embeds"])
+        <= MAX_MESSAGE_EMBED_TEXT_LENGTH
+        and all(
+            len(embed.get("description", "")) <= MAX_DESCRIPTION_LENGTH
+            for embed in payload["embeds"]
+        )
+        for payload in payloads
+    )
+    assert all(
+        "footer" not in embed
+        for payload in payloads[:-1]
+        for embed in payload["embeds"]
+    )
+    assert payloads[-1]["embeds"][-1]["footer"]["text"].endswith(
+        "公告 ID：82289"
+    )
+
+    descriptions = [
+        embed.get("description", "")
+        for payload in payloads
+        for embed in payload["embeds"]
+    ]
+    for index in (0, 1, 7_902, 15_804):
+        row = f"• 角色名稱：測試角色{index:04d}\n  制裁結果：永久鎖定"
+        assert sum(row in description for description in descriptions) == 1
+
+
 def test_long_payloads_preserve_text_and_image_block_order():
     first_image = "https://cdn.example.com/first.jpg"
     second_image = "https://cdn.example.com/second.jpg"
