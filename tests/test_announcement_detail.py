@@ -486,6 +486,31 @@ def test_body_over_safe_parser_limit_fails_instead_of_silent_truncation():
         fetch_announcement_detail(item(), timeout=1, user_agent="test", session=session)
 
 
+def test_82289_sized_sanction_table_above_previous_limit_is_accepted():
+    row_count = 15_805
+    rows = "".join(
+        f"<tr><td>測試角色{index:05d}</td><td>永久鎖定</td></tr>"
+        for index in range(row_count)
+    )
+    html = (
+        "<p>親愛的冒險者們：</p>"
+        "<table><tr><th>角色名稱</th><th>制裁結果</th></tr>"
+        f"{rows}</table>"
+        "<p>《新楓之谷：經典版》營運團隊 敬上</p>"
+    )
+    session = Session([Response({"data": {"content": html}})])
+
+    detail = fetch_announcement_detail(
+        item(), timeout=1, user_agent="test", session=session
+    )
+
+    assert len(detail.plain_text) > 100_000
+    assert len(detail.plain_text) < MAX_PLAIN_TEXT_LENGTH
+    assert detail.plain_text.count("• 角色名稱：") == row_count
+    assert "• 角色名稱：測試角色00000\n  制裁結果：永久鎖定" in detail.plain_text
+    assert "• 角色名稱：測試角色15804\n  制裁結果：永久鎖定" in detail.plain_text
+
+
 def test_html_anchors_become_markdown_and_duplicate_urls_are_removed():
     html = (
         '<a href="/portal">官方連結</a>'

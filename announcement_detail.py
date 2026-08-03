@@ -16,7 +16,7 @@ from maple_parser import Announcement
 
 DETAIL_API_URL = "https://maplestoryclassic.beanfun.com/api/Bulletin/BulletinDetail"
 LEGACY_NEWS_API_URL = "https://gamaapi.beanfun.com/Api/News/GetNewsContent"
-MAX_PLAIN_TEXT_LENGTH = 100_000
+MAX_PLAIN_TEXT_LENGTH = 500_000
 LOGGER = logging.getLogger("maple-classic-discord-center")
 
 _NON_BODY_TEXT = frozenset({"新楓之谷：經典版官方網站", "新楓之谷：經典版", "MapleStory Classic Official Website"})
