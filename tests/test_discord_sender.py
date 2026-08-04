@@ -330,6 +330,39 @@ def test_82289_scale_body_builds_legal_lossless_payloads():
         assert sum(row in description for description in descriptions) == 1
 
 
+def test_compact_sanction_announcement_builds_one_payload_without_chunk_number():
+    item = Announcement(
+        "82309",
+        "重要",
+        "新楓之谷：經典版《0804(二)遊戲異常行為制裁公告》",
+        "2026/08/04",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82309",
+    )
+    content = (
+        "親愛的冒險者們：\n"
+        "為了維護優良的遊戲環境與確保全體玩家的公平性，營運團隊持續進行查緝。\n"
+        "以下帳號因嚴重違反遊戲規章，已執行「永久鎖定」處分。\n"
+        "處置對象角色數量：共18,924名\n"
+        "營運團隊重申與叮嚀：\n"
+        "請冒險者切勿抱持僥倖心態，安裝或使用任何非官方授權之輔助程式。\n"
+        "感謝大家的配合與支持！\n"
+        "《新楓之谷：經典版》營運團隊 敬上"
+    )
+
+    payloads = build_announcement_payloads(item, blocks=(TextBlock(content),))
+
+    assert len(payloads) == 1
+    validate_announcement_payloads(item, payloads)
+    description = payloads[0]["embeds"][0]["description"]
+    assert "📄 **公告內容**" in description
+    assert "公告內容（1/" not in description
+    assert "處置對象角色數量：共18,924名" in description
+    assert "角色名稱：" not in description
+    assert payloads[0]["embeds"][-1]["footer"]["text"].endswith(
+        "公告 ID：82309"
+    )
+
+
 def test_long_payloads_preserve_text_and_image_block_order():
     first_image = "https://cdn.example.com/first.jpg"
     second_image = "https://cdn.example.com/second.jpg"

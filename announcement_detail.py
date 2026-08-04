@@ -51,6 +51,9 @@ _WRAPPED_MARKDOWN_LINK_RE = re.compile(
 )
 _TABLE_CONTINUATION_TOKEN = "\uf000"
 _TABLE_COLUMN_NAMES = ("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+_SANCTION_TITLE_MARKER = "遊戲異常行為制裁公告"
+_SANCTION_BODY_MARKER = "以下帳號因"
+_SANCTION_TABLE_HEADERS = frozenset({"角色名稱", "制裁結果"})
 
 
 class AnnouncementDetailError(RuntimeError):
@@ -123,6 +126,31 @@ def _is_content_image(image: Tag, url: str) -> bool:
 
 def _direct_table_cells(row: Tag) -> list[Tag]:
     return [cell for cell in row.find_all(("th", "td"), recursive=False)]
+
+
+def _is_sanction_announcement(title: str, html: str) -> bool:
+    if _SANCTION_TITLE_MARKER not in title:
+        return False
+    body_text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    return _SANCTION_BODY_MARKER in re.sub(r"\s+", "", body_text)
+
+
+def _is_sanction_list_table(table: Tag) -> bool:
+    first_row = next(
+        (
+            row
+            for row in table.find_all("tr")
+            if row.find_parent("table") is table
+        ),
+        None,
+    )
+    if first_row is None:
+        return False
+    headers = {
+        re.sub(r"\s+", "", cell.get_text(" ", strip=True))
+        for cell in _direct_table_cells(first_row)
+    }
+    return _SANCTION_TABLE_HEADERS.issubset(headers)
 
 
 def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:
@@ -209,7 +237,12 @@ def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:
     return "\n".join(generic_rows)
 
 
-def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
+def _detail_from_html(
+    value: str,
+    *,
+    base_url: str,
+    omit_sanction_list: bool = False,
+) -> AnnouncementDetail:
     """Walk DOM nodes in order, flushing text whenever a valid image is reached."""
     soup = BeautifulSoup(value, "html.parser")
     text_parts: list[str] = []
@@ -259,6 +292,10 @@ def _detail_from_html(value: str, *, base_url: str) -> AnnouncementDetail:
         if not isinstance(node, Tag):
             return
         if node.name == "table":
+            if omit_sanction_list and _is_sanction_list_table(node):
+                row_count = max(len(node.find_all("tr")) - 1, 0)
+                LOGGER.info("Sanction list table omitted: rows=%d", row_count)
+                return
             table_text = _format_table(node, render_table_cell)
             if table_text:
                 if text_parts and not text_parts[-1].endswith("\n"):
@@ -350,21 +387,39 @@ def _content_kind(value: str) -> str:
 
 
 def _parse_content_value(
-    value: str, *, base_url: str
+    value: str,
+    *,
+    base_url: str,
+    announcement_title: str = "",
 ) -> tuple[AnnouncementDetail | None, str, str]:
     kind = _content_kind(value)
     if kind == "full HTML page":
-        detail, selector = _html_detail(value, base_url=base_url)
+        detail, selector = _html_detail(
+            value,
+            base_url=base_url,
+            announcement_title=announcement_title,
+        )
         return detail, kind, selector
     if is_template_garbage(value):
         return None, kind, "rejected-template"
-    detail = _usable_detail(_detail_from_html(value, base_url=base_url))
+    detail = _usable_detail(
+        _detail_from_html(
+            value,
+            base_url=base_url,
+            omit_sanction_list=_is_sanction_announcement(
+                announcement_title, value
+            ),
+        )
+    )
     selector = "fragment-root" if kind == "HTML fragment" else "plain-text-root"
     return detail, kind, selector
 
 
 def _json_detail_with_source(
-    payload: Any, *, base_url: str
+    payload: Any,
+    *,
+    base_url: str,
+    announcement_title: str = "",
 ) -> tuple[AnnouncementDetail, str, int, str, str] | None:
     if not isinstance(payload, dict) or payload.get("code") not in (None, 1, "1"):
         return None
@@ -387,7 +442,9 @@ def _json_detail_with_source(
             value = candidate.get(key)
             if isinstance(value, str) and value.strip():
                 detail, kind, selector = _parse_content_value(
-                    value, base_url=base_url
+                    value,
+                    base_url=base_url,
+                    announcement_title=announcement_title,
                 )
                 if detail:
                     return (
@@ -400,8 +457,17 @@ def _json_detail_with_source(
     return None
 
 
-def _json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
-    result = _json_detail_with_source(payload, base_url=base_url)
+def _json_detail(
+    payload: Any,
+    *,
+    base_url: str,
+    announcement_title: str = "",
+) -> AnnouncementDetail | None:
+    result = _json_detail_with_source(
+        payload,
+        base_url=base_url,
+        announcement_title=announcement_title,
+    )
     return result[0] if result else None
 
 
@@ -420,7 +486,12 @@ def _legacy_news_parameters(url: str) -> tuple[str, str] | None:
     return news_id, service_id
 
 
-def _legacy_json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | None:
+def _legacy_json_detail(
+    payload: Any,
+    *,
+    base_url: str,
+    announcement_title: str = "",
+) -> AnnouncementDetail | None:
     if not isinstance(payload, dict) or payload.get("ResultCode") not in (1, "1"):
         return None
     result_data = payload.get("ResultData")
@@ -429,11 +500,20 @@ def _legacy_json_detail(payload: Any, *, base_url: str) -> AnnouncementDetail | 
     contents = result_data.get("Contents")
     if not isinstance(contents, str) or not contents.strip():
         return None
-    detail, _, _ = _parse_content_value(contents, base_url=base_url)
+    detail, _, _ = _parse_content_value(
+        contents,
+        base_url=base_url,
+        announcement_title=announcement_title,
+    )
     return detail
 
 
-def _html_detail(html: str, *, base_url: str) -> tuple[AnnouncementDetail | None, str]:
+def _html_detail(
+    html: str,
+    *,
+    base_url: str,
+    announcement_title: str = "",
+) -> tuple[AnnouncementDetail | None, str]:
     if not isinstance(html, str) or not html.strip():
         return None, "document"
     soup = BeautifulSoup(html, "html.parser")
@@ -447,7 +527,16 @@ def _html_detail(html: str, *, base_url: str) -> tuple[AnnouncementDetail | None
             continue
         for heading in container.select("h1"):
             heading.decompose()
-        detail = _usable_detail(_detail_from_html(str(container), base_url=base_url))
+        container_html = str(container)
+        detail = _usable_detail(
+            _detail_from_html(
+                container_html,
+                base_url=base_url,
+                omit_sanction_list=_is_sanction_announcement(
+                    announcement_title, container_html
+                ),
+            )
+        )
         if detail:
             return detail, selector
     if is_template_garbage(html):
@@ -469,7 +558,9 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
             LOGGER.info("Detail API HTTP Status Code=%s", getattr(response, "status_code", "unknown"))
             response.raise_for_status()
             result = _json_detail_with_source(
-                response.json(), base_url=announcement.url
+                response.json(),
+                base_url=announcement.url,
+                announcement_title=announcement.title,
             )
             if result:
                 detail, field_path, raw_length, content_kind, selector = result
@@ -511,6 +602,7 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
                 detail = _legacy_json_detail(
                     response.json(),
                     base_url=announcement.url,
+                    announcement_title=announcement.title,
                 )
                 LOGGER.info(
                     "Legacy Detail API Content Length=%d",
@@ -527,7 +619,11 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
         LOGGER.info("HTML Fallback=True")
         response = client.get(announcement.url, headers=headers, timeout=timeout)
         response.raise_for_status()
-        detail, selector = _html_detail(response.text, base_url=announcement.url)
+        detail, selector = _html_detail(
+            response.text,
+            base_url=announcement.url,
+            announcement_title=announcement.title,
+        )
         LOGGER.info("HTML selector=%s", selector)
         LOGGER.info("HTML extracted length=%d", len(detail.plain_text if detail else ""))
     except requests.RequestException as exc:

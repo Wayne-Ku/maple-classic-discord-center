@@ -121,6 +121,36 @@ def announcement_82279_content(row_count=450):
     )
 
 
+def announcement_82309_content(row_count=3):
+    rows = "".join(
+        f"<tr><td>不應顯示角色{index:04d}</td><td>永久鎖定</td></tr>"
+        for index in range(row_count)
+    )
+    return (
+        "<p>親愛的冒險者們：</p>"
+        "<p>為了維護優良的遊戲環境與確保全體玩家的公平性，營運團隊持續進行查緝。</p>"
+        "<p>以下帳號因嚴重違反遊戲規章，已執行「永久鎖定」處分。</p>"
+        "<p>處置對象角色數量：共18,924名</p>"
+        "<table><thead><tr><th>角色名稱</th><th>制裁結果</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+        "<p>營運團隊重申與叮嚀：</p>"
+        "<p>請冒險者切勿抱持僥倖心態，安裝或使用任何非官方授權之輔助程式。</p>"
+        "<p>打造一個公平、乾淨的經典回憶，需要所有冒險者共同守護。</p>"
+        "<p>感謝大家的配合與支持！</p>"
+        "<p>《新楓之谷：經典版》營運團隊 敬上</p>"
+    )
+
+
+def sanction_announcement(title="新楓之谷：經典版《0804(二)遊戲異常行為制裁公告》"):
+    return Announcement(
+        "82309",
+        "重要",
+        title,
+        "2026/08/04",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82309",
+    )
+
+
 def page(content):
     return (
         "<html><head><title>新楓之谷：經典版官方網站</title></head>"
@@ -186,6 +216,98 @@ def test_82279_detail_api_html_fragment_is_parsed_without_container_or_fallback(
     assert "HTML selector=fragment-root" in caplog.text
     assert "HTML extracted length=0" not in caplog.text
     assert "HTML Fallback=False" in caplog.text
+
+
+def test_82309_sanction_announcement_omits_account_list_table(caplog):
+    content = announcement_82309_content()
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {"myDataSet": {"table": {"content": content}}},
+                }
+            )
+        ]
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            sanction_announcement(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert detail.plain_text.startswith("親愛的冒險者們：")
+    assert "以下帳號因嚴重違反遊戲規章" in detail.plain_text
+    assert "處置對象角色數量：共18,924名" in detail.plain_text
+    assert "營運團隊重申與叮嚀：" in detail.plain_text
+    assert detail.plain_text.endswith("《新楓之谷：經典版》營運團隊 敬上")
+    assert "角色名稱" not in detail.plain_text
+    assert "制裁結果" not in detail.plain_text
+    assert "不應顯示角色" not in detail.plain_text
+    assert "Sanction list table omitted: rows=3" in caplog.text
+    assert not session.get_calls
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        ("一般重要公告", announcement_82309_content()),
+        (
+            "新楓之谷：經典版《0804(二)遊戲異常行為制裁公告》",
+            announcement_82309_content().replace("以下帳號因", "以下帳號由於"),
+        ),
+    ],
+)
+def test_sanction_list_omission_requires_both_title_and_body_markers(
+    title, content
+):
+    session = Session([Response({"data": {"content": content}})])
+
+    detail = fetch_announcement_detail(
+        sanction_announcement(title),
+        timeout=1,
+        user_agent="test",
+        session=session,
+    )
+
+    assert "• 角色名稱：不應顯示角色0000\n  制裁結果：永久鎖定" in detail.plain_text
+
+
+def test_sanction_detection_does_not_remove_other_table_formats():
+    content = "<p>以下帳號因違規受到處分。</p>" + ANNOUNCEMENT_82273_CONTENT
+    session = Session([Response({"data": {"content": content}})])
+
+    detail = fetch_announcement_detail(
+        sanction_announcement(),
+        timeout=1,
+        user_agent="test",
+        session=session,
+    )
+
+    assert "🎁 道具獎勵" in detail.plain_text
+    assert "• 經驗值1.5倍券（30分鐘） ×2｜14天" in detail.plain_text
+    assert "• 回家卷軸 ×10｜永久" in detail.plain_text
+
+
+def test_sanction_list_is_also_omitted_in_html_fallback():
+    session = Session(
+        [Response({"code": 1, "data": {"myDataSet": {"table": {"content": None}}}})],
+        [Response(text=page(announcement_82309_content()))],
+    )
+
+    detail = fetch_announcement_detail(
+        sanction_announcement(),
+        timeout=1,
+        user_agent="test",
+        session=session,
+    )
+
+    assert "處置對象角色數量：共18,924名" in detail.plain_text
+    assert "不應顯示角色" not in detail.plain_text
+    assert len(session.get_calls) == 1
 
 
 def test_detail_api_full_page_uses_approved_content_container():
