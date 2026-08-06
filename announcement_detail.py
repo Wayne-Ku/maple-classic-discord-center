@@ -128,6 +128,42 @@ def _direct_table_cells(row: Tag) -> list[Tag]:
     return [cell for cell in row.find_all(("th", "td"), recursive=False)]
 
 
+def _cell_background(cell: Tag) -> str | None:
+    """Return an explicitly configured cell background used by visual headers."""
+    bgcolor = str(cell.get("bgcolor") or "").strip().casefold()
+    if bgcolor:
+        return bgcolor
+
+    style = str(cell.get("style") or "")
+    match = re.search(
+        r"(?:^|;)\s*background(?:-color)?\s*:\s*([^;]+)",
+        style,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip().casefold() if match else None
+
+
+def _has_visual_header_row(rows: list[tuple[list[Tag], list[str]]]) -> bool:
+    """Recognize API tables whose header semantics exist only in cell styling."""
+    if len(rows) < 2:
+        return False
+
+    first_cells, first_values = rows[0]
+    if len(first_cells) < 2 or not all(first_values):
+        return False
+
+    header_backgrounds = [_cell_background(cell) for cell in first_cells]
+    if not header_backgrounds[0] or len(set(header_backgrounds)) != 1:
+        return False
+
+    header_background = header_backgrounds[0]
+    return any(
+        len(cells) == len(first_cells)
+        and any(_cell_background(cell) != header_background for cell in cells)
+        for cells, _ in rows[1:]
+    )
+
+
 def _is_sanction_announcement(title: str, html: str) -> bool:
     if _SANCTION_TITLE_MARKER not in title:
         return False
@@ -174,6 +210,7 @@ def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:
     has_header = (
         any(cell.name == "th" for cell in first_cells)
         or any(cell.find_parent("thead") is not None for cell in first_cells)
+        or _has_visual_header_row(rows)
         or (
             len(rows) > 1
             and bool(nonempty_first_cells)

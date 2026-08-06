@@ -546,6 +546,56 @@ def test_unknown_table_uses_thead_labels_for_each_body_row():
     assert detail.plain_text.count("• 階段：") == 2
 
 
+def test_82337_styled_td_header_preserves_real_column_names():
+    html = """
+    <p>登入就送以下好禮：</p>
+    <table>
+      <tbody>
+        <tr>
+          <td style="background-color:#a4c2f4">品名</td>
+          <td style="background-color:#a4c2f4">數量</td>
+          <td style="background-color:#a4c2f4">期限</td>
+          <td style="background-color:#a4c2f4">備註</td>
+        </tr>
+        <tr>
+          <td style="background-color:#a4c2f4">白色兔子寵物</td>
+          <td>1</td>
+          <td>不適用</td>
+          <td>可使用生命水復活，魔法時間90日。</td>
+        </tr>
+        <tr>
+          <td style="background-color:#a4c2f4">選擇型欄位4格擴充券</td>
+          <td>2</td>
+          <td>7日</td>
+          <td>無法交換</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>簡訊寄送時間：2026/07/31(五)14:00後陸續發送</p>
+    """
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+
+    assert detail.plain_text == (
+        "登入就送以下好禮：\n\n"
+        "• 品名：白色兔子寵物\n"
+        "  數量：1\n"
+        "  期限：不適用\n"
+        "  備註：可使用生命水復活，魔法時間90日。\n"
+        "• 品名：選擇型欄位4格擴充券\n"
+        "  數量：2\n"
+        "  期限：7日\n"
+        "  備註：無法交換\n\n"
+        "簡訊寄送時間：2026/07/31(五)14:00後陸續發送"
+    )
+    assert "欄位一" not in detail.plain_text
+    assert "• 品名：品名" not in detail.plain_text
+
+
 def test_full_page_template_without_approved_content_container_is_rejected():
     session = Session(
         [
