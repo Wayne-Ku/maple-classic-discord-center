@@ -36,6 +36,8 @@ def _send(config: Config, item: Announcement) -> None:
         "spacer_emoji": config.discord_spacer_emoji,
         "blocks": detail.blocks,
     }
+    if config.discord_bot_token and not config.test_mode:
+        kwargs["bot_token"] = config.discord_bot_token
     send_announcement(config.discord_webhook_url or "", item, **kwargs)
 
 

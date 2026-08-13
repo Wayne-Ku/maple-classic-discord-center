@@ -59,6 +59,7 @@ DISCORD_WEBHOOK_HOSTS = {
     "canary.discord.com",
     "ptb.discord.com",
 }
+DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 
 _SECTION_HEADING_REPLACEMENTS = {
     "活動內容": "📌 活動內容",
@@ -869,9 +870,13 @@ def _validate_webhook_url(webhook_url: str) -> None:
         raise DiscordSendError("Discord Webhook URL 格式不正確。")
 
 
-def _response_detail(response: object, webhook_url: str) -> str:
+def _response_detail(response: object, *sensitive_values: str) -> str:
     status_code = getattr(response, "status_code", None)
-    text = str(getattr(response, "text", "")).replace(webhook_url, "[REDACTED]")[:200]
+    text = str(getattr(response, "text", ""))
+    for value in sensitive_values:
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    text = text[:200]
     if status_code is None:
         return ""
     return f"（HTTP {status_code}: {text}）"
@@ -898,6 +903,17 @@ def _discord_message_id(response: object) -> str | None:
     return str(message_id) if message_id is not None else None
 
 
+def _discord_channel_id(response: object) -> str | None:
+    try:
+        payload = response.json()
+    except (AttributeError, TypeError, ValueError, requests.RequestException):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    channel_id = payload.get("channel_id")
+    return str(channel_id) if channel_id is not None else None
+
+
 def _send_payload(
     client: object,
     *,
@@ -906,7 +922,7 @@ def _send_payload(
     user_agent: str,
     timeout: float,
     sleep: Callable[[float], None],
-) -> str | None:
+) -> tuple[str | None, str | None]:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = client.post(
@@ -919,9 +935,15 @@ def _send_payload(
             status_code = getattr(response, "status_code", None)
             if status_code is None:
                 response.raise_for_status()
-                return _discord_message_id(response)
+                return (
+                    _discord_message_id(response),
+                    _discord_channel_id(response),
+                )
             if 200 <= status_code < 300:
-                return _discord_message_id(response)
+                return (
+                    _discord_message_id(response),
+                    _discord_channel_id(response),
+                )
             retryable = status_code == 429 or status_code in {500, 502, 503, 504}
             if not retryable:
                 raise DiscordSendError(
@@ -950,6 +972,74 @@ def _send_payload(
     raise DiscordSendError("Discord Webhook 發送失敗：已超過重試次數。")
 
 
+def _publish_message(
+    client: object,
+    *,
+    channel_id: str,
+    message_id: str,
+    bot_token: str,
+    webhook_url: str,
+    user_agent: str,
+    timeout: float,
+    sleep: Callable[[float], None],
+) -> None:
+    if not channel_id.isdecimal() or not message_id.isdecimal():
+        raise DiscordSendError(
+            "Discord Webhook 回應的頻道或訊息 ID 格式不正確。"
+        )
+
+    publish_url = (
+        f"{DISCORD_API_BASE_URL}/channels/{channel_id}/messages/{message_id}/crosspost"
+    )
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.post(
+                publish_url,
+                headers={
+                    "Authorization": f"Bot {bot_token}",
+                    "User-Agent": user_agent,
+                },
+                timeout=timeout,
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is None:
+                response.raise_for_status()
+                return
+            if 200 <= status_code < 300:
+                return
+            retryable = status_code == 429 or status_code in {500, 502, 503, 504}
+            if not retryable:
+                raise DiscordSendError(
+                    "Discord 公告發布失敗："
+                    f"{_response_detail(response, webhook_url, bot_token)}"
+                )
+            error = DiscordSendError(
+                "Discord 公告發布失敗："
+                f"{_response_detail(response, webhook_url, bot_token)}"
+            )
+            delay = (
+                _retry_after(response, float(2 ** (attempt - 1)))
+                if status_code == 429
+                else float(2 ** (attempt - 1))
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            error = DiscordSendError(
+                "Discord 公告發布失敗：連線或 timeout 錯誤。"
+            )
+            delay = float(2 ** (attempt - 1))
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            raise DiscordSendError(
+                "Discord 公告發布失敗：請求錯誤"
+                f"{_response_detail(response, webhook_url, bot_token)}"
+            ) from exc
+
+        if attempt == MAX_ATTEMPTS:
+            raise error
+        sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
+    raise DiscordSendError("Discord 公告發布失敗：已超過重試次數。")
+
+
 def send_announcement(
     webhook_url: str,
     announcement: Announcement,
@@ -962,6 +1052,7 @@ def send_announcement(
     images: Sequence[str] | None = None,
     blocks: Sequence[AnnouncementContentBlock] | None = None,
     history_mode: bool = False,
+    bot_token: str | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -998,7 +1089,7 @@ def send_announcement(
                 text_length,
             )
             try:
-                message_id = _send_payload(
+                message_id, channel_id = _send_payload(
                     client,
                     webhook_url=webhook_url,
                     payload=payload,
@@ -1025,6 +1116,54 @@ def send_announcement(
                 chunk_index,
                 total_chunks,
                 message_id or "unavailable",
+            )
+            publish_token = (bot_token or "").strip()
+            if not publish_token:
+                continue
+            if not message_id or not channel_id:
+                raise DiscordSendError(
+                    "Discord 公告分段發布失敗："
+                    f"ID={announcement.announcement_id} "
+                    f"chunk={chunk_index}/{total_chunks} "
+                    "Webhook 回應缺少 message_id 或 channel_id。"
+                )
+            LOGGER.info(
+                "Publishing Discord chunk: ID=%s chunk=%d/%d message_id=%s",
+                announcement.announcement_id,
+                chunk_index,
+                total_chunks,
+                message_id,
+            )
+            try:
+                _publish_message(
+                    client,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    bot_token=publish_token,
+                    webhook_url=webhook_url,
+                    user_agent=user_agent,
+                    timeout=timeout,
+                    sleep=sleep,
+                )
+            except DiscordSendError as exc:
+                LOGGER.error(
+                    "Discord chunk publish failed: ID=%s chunk=%d/%d reason=%s",
+                    announcement.announcement_id,
+                    chunk_index,
+                    total_chunks,
+                    exc,
+                )
+                raise DiscordSendError(
+                    "Discord 公告分段發布失敗："
+                    f"ID={announcement.announcement_id} "
+                    f"chunk={chunk_index}/{total_chunks} {exc}"
+                ) from exc
+            LOGGER.info(
+                "Discord chunk publish success: ID=%s chunk=%d/%d message_id=%s",
+                announcement.announcement_id,
+                chunk_index,
+                total_chunks,
+                message_id,
             )
     finally:
         if owns_session:

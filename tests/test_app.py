@@ -347,3 +347,53 @@ def test_82279_is_recorded_only_after_complete_send_and_not_sent_again(
     assert load_sent_ids(path) == {"82278", "82279"}
     assert app.run(make_config(path)) == 0
     assert calls == ["82279"]
+
+
+def test_normal_mode_passes_bot_token_for_auto_publish(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+    config = Config(
+        "https://discord.invalid/webhook",
+        False,
+        path,
+        5,
+        "test",
+        discord_bot_token="test-bot-token",
+    )
+
+    assert app.run(config) == 0
+    assert calls[0]["bot_token"] == "test-bot-token"
+
+
+def test_test_mode_does_not_publish_to_following_servers(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
+    items = [Announcement("2", "更新", "測試公告", "2026/02/02", "https://x/2")]
+    calls = []
+    monkeypatch.setattr(app, "fetch_announcements", lambda **kwargs: items)
+    monkeypatch.setattr(
+        app, "send_announcement", lambda _url, _item, **kwargs: calls.append(kwargs)
+    )
+    config = Config(
+        "https://discord.invalid/webhook",
+        True,
+        path,
+        5,
+        "test",
+        discord_bot_token="test-bot-token",
+    )
+
+    assert app.run(config) == 0
+    assert "bot_token" not in calls[0]

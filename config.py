@@ -54,6 +54,7 @@ class Config:
     user_agent: str
     maple_thumbnail_url: str | None = None
     discord_spacer_emoji: str | None = None
+    discord_bot_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,4 +80,6 @@ class Config:
             discord_spacer_emoji=validate_discord_spacer_emoji(
                 os.getenv("DISCORD_SPACER_EMOJI")
             ),
+            discord_bot_token=(os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+            or None,
         )
