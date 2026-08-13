@@ -187,6 +187,135 @@ class FakeSession:
         self.closed = True
 
 
+def test_bot_token_publishes_created_webhook_message():
+    bot_token = "test-bot-token"
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                json_body={"id": "456789", "channel_id": "123456"},
+            ),
+            FakeResponse(200),
+        ]
+    )
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test-agent",
+        bot_token=bot_token,
+        session=session,
+    )
+
+    assert len(session.calls) == 2
+    webhook_url, webhook_kwargs = session.calls[0]
+    publish_url, publish_kwargs = session.calls[1]
+    assert webhook_url == WEBHOOK
+    assert webhook_kwargs["params"] == {"wait": "true"}
+    assert publish_url == (
+        "https://discord.com/api/v10/channels/123456/messages/456789/crosspost"
+    )
+    assert publish_kwargs == {
+        "headers": {
+            "Authorization": f"Bot {bot_token}",
+            "User-Agent": "test-agent",
+        },
+        "timeout": 15,
+    }
+
+
+def test_bot_token_requires_message_and_channel_ids_from_webhook_response():
+    session = FakeSession([FakeResponse(200, json_body={"id": "456789"})])
+    with pytest.raises(
+        DiscordSendError, match="缺少 message_id 或 channel_id"
+    ):
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            bot_token="test-bot-token",
+            session=session,
+        )
+    assert len(session.calls) == 1
+
+
+def test_publish_429_retries_using_retry_after():
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                json_body={"id": "456789", "channel_id": "123456"},
+            ),
+            FakeResponse(429, json_body={"retry_after": 0.25}),
+            FakeResponse(200),
+        ]
+    )
+    sleeps = []
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        bot_token="test-bot-token",
+        session=session,
+        sleep=sleeps.append,
+    )
+    assert len(session.calls) == 3
+    assert sleeps == [0.25]
+
+
+def test_publish_failure_is_safe_and_identifies_chunk():
+    bot_token = "secret-bot-token"
+    response_text = f"failed {WEBHOOK} {bot_token}"
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                json_body={"id": "456789", "channel_id": "123456"},
+            ),
+            FakeResponse(403, text=response_text),
+        ]
+    )
+    with pytest.raises(DiscordSendError) as error:
+        send_announcement(
+            WEBHOOK,
+            announcement(),
+            user_agent="test",
+            bot_token=bot_token,
+            session=session,
+        )
+    assert "chunk=1/1" in str(error.value)
+    assert "HTTP 403" in str(error.value)
+    assert WEBHOOK not in str(error.value)
+    assert bot_token not in str(error.value)
+
+
+def test_every_webhook_chunk_is_published_before_sending_the_next_chunk():
+    session = FakeSession(
+        [
+            FakeResponse(200, json_body={"id": "101", "channel_id": "999"}),
+            FakeResponse(200),
+            FakeResponse(200, json_body={"id": "102", "channel_id": "999"}),
+            FakeResponse(200),
+        ]
+    )
+    blocks = (TextBlock("body"),) + tuple(
+        ImageBlock(f"https://cdn.example.com/{index}.jpg") for index in range(12)
+    )
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        blocks=blocks,
+        bot_token="test-bot-token",
+        session=session,
+    )
+    assert [call[0] for call in session.calls] == [
+        WEBHOOK,
+        "https://discord.com/api/v10/channels/999/messages/101/crosspost",
+        WEBHOOK,
+        "https://discord.com/api/v10/channels/999/messages/102/crosspost",
+    ]
+
+
 def announcement(title="標題", category="重要", date="2026/07/23", url="https://example.com/1"):
     return Announcement("1", category, title, date, url)
 

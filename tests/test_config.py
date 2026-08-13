@@ -59,3 +59,15 @@ def test_spacer_emoji_rejects_invalid_formats(monkeypatch, spacer_emoji):
 
     with pytest.raises(ValueError, match="DISCORD_SPACER_EMOJI"):
         Config.from_env()
+
+
+def test_bot_token_is_none_when_unset(monkeypatch):
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+    assert Config.from_env().discord_bot_token is None
+
+
+def test_bot_token_is_trimmed_when_set(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "  test-bot-token  ")
+
+    assert Config.from_env().discord_bot_token == "test-bot-token"

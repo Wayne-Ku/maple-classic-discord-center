@@ -1,6 +1,6 @@
 # Maple Classic Discord Center
 
-定時讀取《新楓之谷：經典版》官方公告 JSON API，發現新公告時以 Discord Embed 推播。V1 不使用 AI 摘要、資料庫、Bot Token 或 Slash Command。
+定時讀取《新楓之谷：經典版》官方公告 JSON API，發現新公告時以 Discord Embed 推播。V1.4 可在 Webhook 發送成功後自動發布公告，讓追蹤公告頻道的其他社群同步收到訊息。
 
 ## 資料來源
 
@@ -53,17 +53,29 @@ notepad .env
 
 ```dotenv
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/你的資料
+DISCORD_BOT_TOKEN=
 TEST_MODE=false
 STATE_FILE=data/state.json
 REQUEST_TIMEOUT=15
 MAPLE_THUMBNAIL_URL=
 ```
 
-`MAPLE_THUMBNAIL_URL` 為可選設定，必須是 HTTPS 圖片網址；未設定時 Embed 不顯示縮圖。建議使用自行控制或穩定託管的圖片網址。`.env` 與執行時狀態檔都已被 `.gitignore` 排除，請勿提交 `.env`、真正的 Webhook URL 或其他 Secret。
+`MAPLE_THUMBNAIL_URL` 為可選設定，必須是 HTTPS 圖片網址；未設定時 Embed 不顯示縮圖。建議使用自行控制或穩定託管的圖片網址。`.env` 與執行時狀態檔都已被 `.gitignore` 排除，請勿提交 `.env`、真正的 Webhook URL、Bot Token 或其他 Secret。
 
 ## Discord Embed 顯示
 
 每則公告 Embed 會顯示分類、日期、公告編號與官方公告連結；分類保留既有的顏色與 Icon，標題也保留分類 Icon。設定 `MAPLE_THUMBNAIL_URL` 時，該圖片會同時顯示為 author、縮圖與 footer 圖示。
+
+## 公告頻道自動發布
+
+Discord 的 Webhook 只能建立訊息；發布到追蹤頻道需要另外呼叫 Crosspost API。若要啟用自動發布：
+
+1. 在 [Discord Developer Portal](https://discord.com/developers/applications) 建立或選擇 Application，建立 Bot 並取得 Token。
+2. 將 Bot 邀請到公告頻道所在伺服器。
+3. 在該公告頻道授予 Bot `View Channel`、`Send Messages` 與 `Manage Messages` 權限。Webhook 訊息不是 Bot 自己建立的，因此發布時需要 `Manage Messages`。
+4. 將 Token 設為 `DISCORD_BOT_TOKEN`。本機放在 `.env`；GitHub Actions 放在同名 repository secret。
+
+正常模式下，每個 Webhook 分段送達後會立即發布，再繼續下一個分段。若發布失敗，程式會回傳失敗且不會把該公告標記為已完成。未設定 `DISCORD_BOT_TOKEN` 時，程式保留原本只送 Webhook、不發布的行為。
 
 ## 測試 Discord Webhook
 
@@ -73,7 +85,7 @@ MAPLE_THUMBNAIL_URL=
 python app.py
 ```
 
-TEST_MODE 每次都會發送官網目前最新一篇公告，方便重複驗證 Webhook。若這是第一次執行，成功後也會建立完整公告基準；若發送失敗，不會建立或改寫狀態。
+TEST_MODE 每次都會發送官網目前最新一篇公告，方便重複驗證 Webhook，但不會發布到追蹤此公告頻道的其他伺服器。若這是第一次執行，成功後也會建立完整公告基準；若發送失敗，不會建立或改寫狀態。
 
 測試後務必改回：
 
@@ -87,7 +99,7 @@ TEST_MODE=false
 python app.py
 ```
 
-第一次正常執行只會把目前所有公告寫入 `data/state.json` 作為基準，不會洗歷史公告。往後只推播新增公告。每篇公告只有在 Discord 成功接收後才會原子更新狀態檔；失敗公告不會被標記為已發送。
+第一次正常執行只會把目前所有公告寫入 `data/state.json` 作為基準，不會洗歷史公告。往後只推播新增公告。設定 Bot Token 時，每篇公告只有在 Discord 成功接收並發布後才會原子更新狀態檔；發送或發布失敗的公告都不會被標記為已完成。
 
 執行測試：
 
@@ -106,8 +118,9 @@ Workflow 每 15 分鐘執行一次，也支援手動執行。狀態檔透過 Git
 3. 點選 **New repository secret**。
 4. 名稱輸入 `DISCORD_WEBHOOK_URL`。
 5. 值貼上 Discord Webhook URL 並儲存。
+6. 再建立 `DISCORD_BOT_TOKEN`，值貼上 Bot Token 並儲存。若暫時不啟用自動發布，可省略此 Secret。
 
-Workflow 只從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook。
+Workflow 從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook，並從 `${{ secrets.DISCORD_BOT_TOKEN }}` 讀取自動發布所需的 Bot Token；兩者都不會寫入 repository。
 
 ### 手動測試 GitHub Actions
 
@@ -122,7 +135,9 @@ Workflow 只從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook。
 ## 常見錯誤排除
 
 - `缺少 DISCORD_WEBHOOK_URL`：確認 `.env` 名稱正確、沒有存成 `.env.txt`；GitHub 上確認 Secret 名稱完全一致。
-- Discord 回傳 `401` 或 `404`：Webhook URL 無效、已刪除或複製不完整，請在 Discord 重新建立。
+- Webhook 發送回傳 `401` 或 `404`：Webhook URL 無效、已刪除或複製不完整，請在 Discord 重新建立。
+- 公告發布回傳 `401`：`DISCORD_BOT_TOKEN` 無效或已重設，請更新 Secret。
+- 公告發布回傳 `403`：確認 Bot 已加入伺服器，且在公告頻道具備 `View Channel`、`Send Messages` 與 `Manage Messages`。
 - Discord 回傳 `429`：遇到頻率限制；本次會失敗且不標記公告，下次排程會重試。
 - `官網 API 回應格式與預期不符`：官網可能改版。程式會停止且不改狀態，請重新檢查官網 API。
 - `狀態檔 ... 格式不正確`：不要直接覆蓋損壞檔案。先備份並檢查 JSON；刪除狀態檔會讓下一次正常執行重新建立基準。
@@ -131,6 +146,6 @@ Workflow 只從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook。
 
 ## 安全與限制
 
-- 不要把 `.env` 或 Webhook 貼進 issue、log、commit。
-- V1 僅同步新公告；不包含公告內容摘要或 Discord 指令。
+- 不要把 `.env`、Webhook URL 或 Bot Token 貼進 issue、log、commit。
+- V1.4 僅同步新公告並選擇性自動發布；不包含公告內容摘要或 Discord 指令。
 - 程式設定合理 timeout 與專用 User-Agent，官網或 Discord 失敗時以非零狀態結束。
