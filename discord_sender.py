@@ -1040,6 +1040,94 @@ def _publish_message(
     raise DiscordSendError("Discord 公告發布失敗：已超過重試次數。")
 
 
+def _delete_message(
+    client: object,
+    *,
+    webhook_url: str,
+    message_id: str,
+    user_agent: str,
+    timeout: float,
+    sleep: Callable[[float], None],
+) -> None:
+    if not message_id.isdecimal():
+        raise DiscordSendError("Discord 訊息 ID 格式不正確。")
+    message_url = f"{webhook_url.rstrip('/')}/messages/{message_id}"
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.delete(
+                message_url,
+                headers={"User-Agent": user_agent},
+                timeout=timeout,
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is None:
+                response.raise_for_status()
+                return
+            if 200 <= status_code < 300 or status_code == 404:
+                return
+            retryable = status_code == 429 or status_code in {500, 502, 503, 504}
+            if not retryable:
+                raise DiscordSendError(
+                    "Discord Webhook 刪除失敗："
+                    f"{_response_detail(response, webhook_url)}"
+                )
+            error = DiscordSendError(
+                "Discord Webhook 刪除失敗："
+                f"{_response_detail(response, webhook_url)}"
+            )
+            delay = (
+                _retry_after(response, float(2 ** (attempt - 1)))
+                if status_code == 429
+                else float(2 ** (attempt - 1))
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            error = DiscordSendError(
+                "Discord Webhook 刪除失敗：連線或 timeout 錯誤。"
+            )
+            delay = float(2 ** (attempt - 1))
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            raise DiscordSendError(
+                "Discord Webhook 刪除失敗：請求錯誤"
+                f"{_response_detail(response, webhook_url)}"
+            ) from exc
+
+        if attempt == MAX_ATTEMPTS:
+            raise error
+        sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
+    raise DiscordSendError("Discord Webhook 刪除失敗：已超過重試次數。")
+
+
+def delete_announcement_messages(
+    webhook_url: str,
+    message_ids: Sequence[str],
+    *,
+    timeout: float = 15,
+    user_agent: str,
+    session: requests.Session | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Delete recorded webhook messages; missing messages are already synchronized."""
+    if not webhook_url:
+        raise DiscordSendError("缺少 DISCORD_WEBHOOK_URL，無法刪除公告。")
+    _validate_webhook_url(webhook_url)
+    client = session or requests.Session()
+    owns_session = session is None
+    try:
+        for message_id in message_ids:
+            _delete_message(
+                client,
+                webhook_url=webhook_url,
+                message_id=message_id,
+                user_agent=user_agent,
+                timeout=timeout,
+                sleep=sleep,
+            )
+    finally:
+        if owns_session:
+            client.close()
+
+
 def send_announcement(
     webhook_url: str,
     announcement: Announcement,
@@ -1055,7 +1143,7 @@ def send_announcement(
     bot_token: str | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
-) -> None:
+) -> tuple[str, ...]:
     if not webhook_url:
         raise DiscordSendError("缺少 DISCORD_WEBHOOK_URL，無法發送公告。")
     _validate_webhook_url(webhook_url)
@@ -1075,6 +1163,7 @@ def send_announcement(
     validate_announcement_payloads(announcement, payloads)
     client = session or requests.Session()
     owns_session = session is None
+    sent_message_ids: list[str] = []
     try:
         total_chunks = len(payloads)
         for chunk_index, payload in enumerate(payloads, start=1):
@@ -1117,6 +1206,8 @@ def send_announcement(
                 total_chunks,
                 message_id or "unavailable",
             )
+            if message_id:
+                sent_message_ids.append(message_id)
             publish_token = (bot_token or "").strip()
             if not publish_token:
                 continue
@@ -1168,3 +1259,4 @@ def send_announcement(
     finally:
         if owns_session:
             client.close()
+    return tuple(sent_message_ids)
