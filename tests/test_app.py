@@ -6,7 +6,7 @@ import pytest
 from announcement_detail import AnnouncementDetail, TextBlock
 from config import Config
 from maple_parser import Announcement
-from state_store import load_sent_ids
+from state_store import AnnouncementState, load_sent_ids, load_state, save_state
 
 
 @pytest.fixture(autouse=True)
@@ -246,7 +246,7 @@ def test_no_new_announcements_does_not_send_or_write(monkeypatch, tmp_path):
         lambda **kwargs: [Announcement("1", "活動", "既有", "2026/02/01", "https://x/1")],
     )
     monkeypatch.setattr(app, "send_announcement", lambda *args, **kwargs: pytest.fail("must not send"))
-    monkeypatch.setattr(app, "save_sent_ids", lambda *args, **kwargs: pytest.fail("must not write"))
+    monkeypatch.setattr(app, "save_state", lambda *args, **kwargs: pytest.fail("must not write"))
 
     assert app.run(make_config(path)) == 0
 
@@ -397,3 +397,187 @@ def test_test_mode_does_not_publish_to_following_servers(monkeypatch, tmp_path):
 
     assert app.run(config) == 0
     assert "bot_token" not in calls[0]
+
+
+def deletion_items(*ids):
+    return [
+        Announcement(
+            announcement_id,
+            "重要",
+            f"公告 {announcement_id}",
+            "2026/08/21",
+            f"https://x/{announcement_id}",
+        )
+        for announcement_id in ids
+    ]
+
+
+def test_deletion_candidates_ignore_ids_older_than_official_history_window():
+    assert app._deletion_candidates(
+        {"82399", "82400", "82486", "82489"},
+        {"82400", "82489"},
+    ) == ["82486"]
+
+
+def test_first_missing_check_does_not_delete_discord_message(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "state.json"
+    save_state(
+        path,
+        AnnouncementState(
+            sent_ids={"82400", "82486", "82489"},
+            discord_message_ids={"82486": ("1540344741508685845",)},
+        ),
+    )
+    monkeypatch.setattr(
+        app, "fetch_announcements", lambda **_kwargs: deletion_items("82489", "82400")
+    )
+    monkeypatch.setattr(
+        app,
+        "delete_announcement_messages",
+        lambda *_args, **_kwargs: pytest.fail("must wait for confirmation"),
+    )
+    monkeypatch.setattr(
+        app, "send_announcement", lambda *_args, **_kwargs: pytest.fail("must not send")
+    )
+
+    assert app.run(make_config(path)) == 0
+
+    state = load_state(path)
+    assert state is not None
+    assert state.missing_checks == {"82486": 1}
+    assert "82486" in state.sent_ids
+
+
+def test_second_missing_check_deletes_all_messages_and_cleans_state(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "state.json"
+    save_state(
+        path,
+        AnnouncementState(
+            sent_ids={"82400", "82486", "82489"},
+            discord_message_ids={
+                "82486": ("1540344741508685845", "1540344741508685846")
+            },
+            missing_checks={"82486": 1},
+        ),
+    )
+    deleted = []
+    monkeypatch.setattr(
+        app, "fetch_announcements", lambda **_kwargs: deletion_items("82489", "82400")
+    )
+    monkeypatch.setattr(
+        app,
+        "delete_announcement_messages",
+        lambda _url, message_ids, **_kwargs: deleted.append(message_ids),
+    )
+    monkeypatch.setattr(
+        app, "send_announcement", lambda *_args, **_kwargs: pytest.fail("must not send")
+    )
+
+    assert app.run(make_config(path)) == 0
+
+    assert deleted == [
+        ("1540344741508685845", "1540344741508685846")
+    ]
+    state = load_state(path)
+    assert state is not None
+    assert state.sent_ids == {"82400", "82489"}
+    assert "82486" not in state.discord_message_ids
+    assert "82486" not in state.missing_checks
+
+
+def test_reappearing_announcement_clears_pending_deletion(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    original = AnnouncementState(
+        sent_ids={"82400", "82486", "82489"},
+        discord_message_ids={"82486": ("1540344741508685845",)},
+        missing_checks={"82486": 1},
+    )
+    save_state(path, original)
+    monkeypatch.setattr(
+        app,
+        "fetch_announcements",
+        lambda **_kwargs: deletion_items("82489", "82486", "82400"),
+    )
+    monkeypatch.setattr(
+        app,
+        "delete_announcement_messages",
+        lambda *_args, **_kwargs: pytest.fail("must not delete"),
+    )
+    monkeypatch.setattr(
+        app, "send_announcement", lambda *_args, **_kwargs: pytest.fail("must not send")
+    )
+
+    assert app.run(make_config(path)) == 0
+
+    state = load_state(path)
+    assert state is not None
+    assert state.missing_checks == {}
+    assert state.discord_message_ids == original.discord_message_ids
+
+
+def test_delete_failure_is_retried_later_and_does_not_block_new_announcement(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "state.json"
+    save_state(
+        path,
+        AnnouncementState(
+            sent_ids={"82400", "82486", "82489"},
+            discord_message_ids={"82486": ("1540344741508685845",)},
+            missing_checks={"82486": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "fetch_announcements",
+        lambda **_kwargs: deletion_items("82490", "82489", "82400"),
+    )
+    monkeypatch.setattr(
+        app,
+        "delete_announcement_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            app.DiscordSendError("temporary failure")
+        ),
+    )
+    sent = []
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda _url, item, **_kwargs: sent.append(item.announcement_id)
+        or ("1540345000000000000",),
+    )
+
+    assert app.run(make_config(path)) == 0
+
+    assert sent == ["82490"]
+    state = load_state(path)
+    assert state is not None
+    assert "82486" in state.sent_ids
+    assert state.missing_checks["82486"] == 2
+    assert state.discord_message_ids["82490"] == ("1540345000000000000",)
+
+
+def test_test_mode_never_syncs_official_deletions(monkeypatch, tmp_path):
+    path = tmp_path / "state.json"
+    state = AnnouncementState(
+        sent_ids={"82400", "82486", "82489"},
+        discord_message_ids={"82486": ("1540344741508685845",)},
+        missing_checks={"82486": 1},
+    )
+    save_state(path, state)
+    monkeypatch.setattr(
+        app, "fetch_announcements", lambda **_kwargs: deletion_items("82489", "82400")
+    )
+    monkeypatch.setattr(
+        app,
+        "delete_announcement_messages",
+        lambda *_args, **_kwargs: pytest.fail("test mode must not delete"),
+    )
+    monkeypatch.setattr(app, "send_announcement", lambda *_args, **_kwargs: ())
+
+    assert app.run(make_config(path, test_mode=True)) == 0
+    assert load_state(path) == state

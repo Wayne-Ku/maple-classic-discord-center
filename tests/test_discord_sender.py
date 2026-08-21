@@ -15,6 +15,7 @@ from discord_sender import (
     format_content_descriptions,
     get_category_color,
     get_category_display,
+    delete_announcement_messages,
     send_announcement,
     validate_announcement_payloads,
 )
@@ -187,6 +188,23 @@ class FakeSession:
         self.closed = True
 
 
+class DeleteSession:
+    def __init__(self, outcomes):
+        self.outcomes = iter(outcomes)
+        self.calls = []
+        self.closed = False
+
+    def delete(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        outcome = next(self.outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def close(self):
+        self.closed = True
+
+
 def test_bot_token_publishes_created_webhook_message():
     bot_token = "test-bot-token"
     session = FakeSession(
@@ -198,7 +216,7 @@ def test_bot_token_publishes_created_webhook_message():
             FakeResponse(200),
         ]
     )
-    send_announcement(
+    message_ids = send_announcement(
         WEBHOOK,
         announcement(),
         user_agent="test-agent",
@@ -207,6 +225,7 @@ def test_bot_token_publishes_created_webhook_message():
     )
 
     assert len(session.calls) == 2
+    assert message_ids == ("456789",)
     webhook_url, webhook_kwargs = session.calls[0]
     publish_url, publish_kwargs = session.calls[1]
     assert webhook_url == WEBHOOK
@@ -221,6 +240,55 @@ def test_bot_token_publishes_created_webhook_message():
         },
         "timeout": 15,
     }
+
+
+def test_delete_recorded_messages_accepts_deleted_and_already_missing():
+    session = DeleteSession([FakeResponse(204), FakeResponse(404)])
+
+    delete_announcement_messages(
+        WEBHOOK,
+        ("1540344741508685845", "1540344792590843966"),
+        user_agent="test",
+        session=session,
+    )
+
+    assert [call[0] for call in session.calls] == [
+        f"{WEBHOOK}/messages/1540344741508685845",
+        f"{WEBHOOK}/messages/1540344792590843966",
+    ]
+    assert not session.closed
+
+
+def test_delete_recorded_message_retries_429():
+    session = DeleteSession(
+        [FakeResponse(429, json_body={"retry_after": 0.25}), FakeResponse(204)]
+    )
+    sleeps = []
+
+    delete_announcement_messages(
+        WEBHOOK,
+        ("1540344741508685845",),
+        user_agent="test",
+        session=session,
+        sleep=sleeps.append,
+    )
+
+    assert len(session.calls) == 2
+    assert sleeps == [0.25]
+
+
+def test_delete_recorded_message_failure_does_not_expose_webhook():
+    session = DeleteSession([FakeResponse(403, text=WEBHOOK)])
+
+    with pytest.raises(DiscordSendError) as exc_info:
+        delete_announcement_messages(
+            WEBHOOK,
+            ("1540344741508685845",),
+            user_agent="test",
+            session=session,
+        )
+
+    assert WEBHOOK not in str(exc_info.value)
 
 
 def test_bot_token_requires_message_and_channel_ids_from_webhook_response():
@@ -629,15 +697,19 @@ def test_all_chunks_are_sent_once_and_each_success_message_id_is_logged(caplog):
     payloads = build_announcement_payloads(
         announcement(), blocks=(TextBlock(content),)
     )
+    expected_message_ids = tuple(
+        str(1540345000000000000 + index)
+        for index in range(1, len(payloads) + 1)
+    )
     session = FakeSession(
         [
-            FakeResponse(200, json_body={"id": f"message-{index}"})
-            for index in range(1, len(payloads) + 1)
+            FakeResponse(200, json_body={"id": message_id})
+            for message_id in expected_message_ids
         ]
     )
 
     with caplog.at_level("INFO"):
-        send_announcement(
+        message_ids = send_announcement(
             WEBHOOK,
             announcement(),
             user_agent="test",
@@ -646,8 +718,9 @@ def test_all_chunks_are_sent_once_and_each_success_message_id_is_logged(caplog):
         )
 
     assert len(session.calls) == len(payloads)
-    for index in range(1, len(payloads) + 1):
-        assert f"message_id=message-{index}" in caplog.text
+    assert message_ids == expected_message_ids
+    for message_id in expected_message_ids:
+        assert f"message_id={message_id}" in caplog.text
 
 
 @pytest.mark.parametrize(
