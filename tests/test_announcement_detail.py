@@ -6,6 +6,7 @@ import requests
 from announcement_detail import (
     LEGACY_NEWS_API_URL,
     AnnouncementDetailError,
+    ExternalAnnouncementWithoutBodyError,
     ImageBlock,
     MAX_PLAIN_TEXT_LENGTH,
     TextBlock,
@@ -49,6 +50,16 @@ class Session:
 
 def item():
     return Announcement("82221", "活動", "公告標題", "2026/07/28", "https://example.com/bulletin")
+
+
+def external_landing_page_item():
+    return Announcement(
+        "82526",
+        "活動",
+        "新楓之谷：經典版 《帳號綁定 消費回饋福利連動》",
+        "2026/08/27",
+        "https://maplestoryclassic-event.beanfun.com/AccountBind/Index",
+    )
 
 
 def legacy_item():
@@ -172,6 +183,43 @@ def test_detail_api_table_content_is_preferred_without_html_fallback(caplog):
     assert session.closed is False
     assert "Detail API success" in caplog.text
     assert "HTML Fallback=False" in caplog.text
+
+
+def test_82526_empty_detail_api_is_identified_as_official_external_link(caplog):
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "82526",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ]
+    )
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(
+            ExternalAnnouncementWithoutBodyError,
+            match="Official external-link announcement has no inline content",
+        ):
+            fetch_announcement_detail(
+                external_landing_page_item(),
+                timeout=1,
+                user_agent="test",
+                session=session,
+            )
+
+    assert len(session.post_calls) == 1
+    assert not session.get_calls
+    assert "Detail API Content Length=0" in caplog.text
+    assert "official external-link announcement" in caplog.text.casefold()
 
 
 def test_82279_detail_api_html_fragment_is_parsed_without_container_or_fallback(caplog):
