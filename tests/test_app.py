@@ -213,6 +213,50 @@ def test_detail_failure_does_not_send_or_update_state(monkeypatch, tmp_path, cap
     assert "reason=missing" in caplog.text
 
 
+def test_official_external_link_without_body_sends_header_only_and_records_state(
+    monkeypatch, tmp_path, caplog
+):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "sent_announcement_ids": ["1"]}',
+        encoding="utf-8",
+    )
+    item = Announcement(
+        "82526",
+        "活動",
+        "新楓之谷：經典版 《帳號綁定 消費回饋福利連動》",
+        "2026/08/27",
+        "https://maplestoryclassic-event.beanfun.com/AccountBind/Index",
+    )
+    monkeypatch.setattr(app, "fetch_announcements", lambda **_kwargs: [item])
+    monkeypatch.setattr(
+        app,
+        "fetch_announcement_detail",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            app.ExternalAnnouncementWithoutBodyError("no inline content")
+        ),
+    )
+    calls = []
+
+    def send(_url, sent_item, **kwargs):
+        calls.append((sent_item, kwargs))
+        return ("1542541739292753996",)
+
+    monkeypatch.setattr(app, "send_announcement", send)
+
+    with caplog.at_level(logging.WARNING):
+        assert app.run(make_config(path)) == 0
+
+    assert len(calls) == 1
+    assert calls[0][0] == item
+    assert calls[0][1]["blocks"] == ()
+    state = load_state(path)
+    assert state is not None
+    assert state.sent_ids == {"1", "82526"}
+    assert state.discord_message_ids["82526"] == ("1542541739292753996",)
+    assert "改以標題連結安全發送" in caplog.text
+
+
 def test_each_new_announcement_fetches_detail_once(monkeypatch, tmp_path):
     path = tmp_path / "state.json"
     path.write_text(

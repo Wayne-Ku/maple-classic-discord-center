@@ -60,6 +60,10 @@ class AnnouncementDetailError(RuntimeError):
     """Raised when an announcement body cannot be obtained."""
 
 
+class ExternalAnnouncementWithoutBodyError(AnnouncementDetailError):
+    """Raised when an official external landing page has no inline body."""
+
+
 @dataclass(frozen=True)
 class TextBlock:
     text: str
@@ -523,6 +527,29 @@ def _legacy_news_parameters(url: str) -> tuple[str, str] | None:
     return news_id, service_id
 
 
+def _is_official_external_landing_page(url: str) -> bool:
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").casefold()
+    return (
+        parsed.scheme.casefold() == "https"
+        and hostname.endswith(".beanfun.com")
+        and hostname
+        not in {"maplestoryclassic.beanfun.com", "tw.beanfun.com"}
+    )
+
+
+def _detail_api_confirms_empty_inline_content(payload: Any) -> bool:
+    if not isinstance(payload, dict) or payload.get("code") not in (None, 1, "1"):
+        return False
+    data = payload.get("data")
+    dataset = data.get("myDataSet") if isinstance(data, dict) else None
+    table = dataset.get("table") if isinstance(dataset, dict) else None
+    if not isinstance(table, dict) or "content" not in table:
+        return False
+    content = table.get("content")
+    return content is None or (isinstance(content, str) and not content.strip())
+
+
 def _legacy_json_detail(
     payload: Any,
     *,
@@ -594,8 +621,9 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
             response = client.post(DETAIL_API_URL, params={"pbid": announcement.announcement_id}, headers=headers, timeout=timeout)
             LOGGER.info("Detail API HTTP Status Code=%s", getattr(response, "status_code", "unknown"))
             response.raise_for_status()
+            payload = response.json()
             result = _json_detail_with_source(
-                response.json(),
+                payload,
                 base_url=announcement.url,
                 announcement_title=announcement.title,
             )
@@ -612,6 +640,19 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
                 LOGGER.info("Final sent content length=%d", len(detail.plain_text))
                 return detail
             LOGGER.info("Detail API Content Length=0")
+            if (
+                _detail_api_confirms_empty_inline_content(payload)
+                and _is_official_external_landing_page(announcement.url)
+            ):
+                LOGGER.info(
+                    "Official external-link announcement has no inline content: "
+                    "ID=%s host=%s",
+                    announcement.announcement_id,
+                    urlsplit(announcement.url).hostname,
+                )
+                raise ExternalAnnouncementWithoutBodyError(
+                    "Official external-link announcement has no inline content"
+                )
         except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
             LOGGER.info("Detail API unavailable: %s", type(exc).__name__)
 
