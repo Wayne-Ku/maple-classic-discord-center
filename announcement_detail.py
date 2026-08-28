@@ -54,6 +54,15 @@ _TABLE_COLUMN_NAMES = ("一", "二", "三", "四", "五", "六", "七", "八", "
 _SANCTION_TITLE_MARKER = "遊戲異常行為制裁公告"
 _SANCTION_BODY_MARKER = "以下帳號因"
 _SANCTION_TABLE_HEADERS = frozenset({"角色名稱", "制裁結果"})
+_OFFICIAL_EXTERNAL_CONTENT_SELECTORS = {
+    (
+        "maplestoryclassic-event.beanfun.com",
+        "/accountbind/index",
+    ): (
+        ("📌 活動說明", ".explain-article"),
+        ("⚠️ 注意事項", ".notify-article"),
+    ),
+}
 
 
 class AnnouncementDetailError(RuntimeError):
@@ -550,6 +559,38 @@ def _detail_api_confirms_empty_inline_content(payload: Any) -> bool:
     return content is None or (isinstance(content, str) and not content.strip())
 
 
+def _official_external_landing_page_detail(
+    html: str,
+    *,
+    base_url: str,
+) -> tuple[AnnouncementDetail | None, str]:
+    parsed_url = urlsplit(base_url)
+    key = (
+        (parsed_url.hostname or "").casefold(),
+        parsed_url.path.rstrip("/").casefold() or "/",
+    )
+    selectors = _OFFICIAL_EXTERNAL_CONTENT_SELECTORS.get(key)
+    if not selectors or not isinstance(html, str) or not html.strip():
+        return None, "external-not-allowed"
+
+    soup = BeautifulSoup(html, "html.parser")
+    fragments: list[str] = []
+    used_selectors: list[str] = []
+    for heading, selector in selectors:
+        container = soup.select_one(selector)
+        if container is None:
+            return None, f"external-missing:{selector}"
+        for tag in container(["script", "style", "noscript", "form"]):
+            tag.decompose()
+        fragments.append(f"<section><h2>{heading}</h2>{container}</section>")
+        used_selectors.append(selector)
+
+    detail = _usable_detail(
+        _detail_from_html("".join(fragments), base_url=base_url)
+    )
+    return detail, "external:" + "+".join(used_selectors)
+
+
 def _legacy_json_detail(
     payload: Any,
     *,
@@ -614,6 +655,7 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
     owns_session = session is None
     headers = {"User-Agent": user_agent, "Accept": "application/json, text/html;q=0.9"}
     detail_url = f"{DETAIL_API_URL}?pbid={announcement.announcement_id}"
+    external_inline_content_absent = False
     try:
         LOGGER.info("Announcement ID=%s", announcement.announcement_id)
         LOGGER.info("Detail API URL=%s", detail_url)
@@ -644,14 +686,12 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
                 _detail_api_confirms_empty_inline_content(payload)
                 and _is_official_external_landing_page(announcement.url)
             ):
+                external_inline_content_absent = True
                 LOGGER.info(
                     "Official external-link announcement has no inline content: "
                     "ID=%s host=%s",
                     announcement.announcement_id,
                     urlsplit(announcement.url).hostname,
-                )
-                raise ExternalAnnouncementWithoutBodyError(
-                    "Official external-link announcement has no inline content"
                 )
         except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
             LOGGER.info("Detail API unavailable: %s", type(exc).__name__)
@@ -697,11 +737,19 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
         LOGGER.info("HTML Fallback=True")
         response = client.get(announcement.url, headers=headers, timeout=timeout)
         response.raise_for_status()
-        detail, selector = _html_detail(
-            response.text,
-            base_url=announcement.url,
-            announcement_title=announcement.title,
-        )
+        detail = None
+        selector = "external-not-allowed"
+        if _is_official_external_landing_page(announcement.url):
+            detail, selector = _official_external_landing_page_detail(
+                response.text,
+                base_url=announcement.url,
+            )
+        if not detail:
+            detail, selector = _html_detail(
+                response.text,
+                base_url=announcement.url,
+                announcement_title=announcement.title,
+            )
         LOGGER.info("HTML selector=%s", selector)
         LOGGER.info("HTML extracted length=%d", len(detail.plain_text if detail else ""))
     except requests.RequestException as exc:
@@ -716,6 +764,13 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
         if owns_session:
             client.close()
     if not detail:
+        if (
+            external_inline_content_absent
+            and _is_official_external_landing_page(announcement.url)
+        ):
+            raise ExternalAnnouncementWithoutBodyError(
+                "Official external-link announcement has no supported inline content"
+            )
         if selector == "rejected-template":
             reason = "HTML fallback rejected suspected full-page website template"
         else:

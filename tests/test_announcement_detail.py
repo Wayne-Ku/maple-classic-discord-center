@@ -98,6 +98,40 @@ FULL_PAGE_TEMPLATE = """
 </body></html>
 """
 
+ANNOUNCEMENT_82526_EXTERNAL_PAGE = """
+<!doctype html>
+<html>
+  <head><title>新楓之谷：經典版 帳號綁定</title></head>
+  <body class="body content">
+    <nav><a href="/">網站導覽</a></nav>
+    <main class="main pic">
+      <div class="log-block pic">
+        新楓之谷經典版帳號：{{ info.classicAccount }}
+        <a class="login-btn" href="/login">登入帳號並進行綁定</a>
+      </div>
+      <div class="explain-block pic">
+        <article class="explain-article">
+          <p>1. 每組帳號僅能進行一次綁定，綁定後不得解除。</p>
+          <p>2. 具體的回饋對照及優惠內容，請參考
+            <a href="https://maplestory-event.beanfun.com/eventad/eventad?eventadid=12590">《新楓之谷》VIP系統介紹網頁</a>
+          </p>
+          <p>* 此項回饋並不會發放VIP點數。 *</p>
+        </article>
+      </div>
+      <div class="notify-block pic">
+        <article class="notify-article">
+          <p>1. 僅能綁定相同遊戲橘子帳號旗下的遊戲帳號。</p>
+          <p>2. 於2026/11/06(含)前綁定，可回饋7/29後的消費紀錄。</p>
+          <p>3. 活動內容如有調整，將由官方另行公告。</p>
+        </article>
+      </div>
+    </main>
+    <dialog>選擇新楓之谷帳號</dialog>
+    <script>window.app = true;</script>
+  </body>
+</html>
+"""
+
 ANNOUNCEMENT_82273_CONTENT = """
 <p>親愛的冒險者們：</p>
 <p>為了感謝各位冒險者對《新楓之谷：經典版》的支持與包容，營運團隊特別準備了「開服三日感恩回饋禮」。</p>
@@ -185,7 +219,7 @@ def test_detail_api_table_content_is_preferred_without_html_fallback(caplog):
     assert "HTML Fallback=False" in caplog.text
 
 
-def test_82526_empty_detail_api_is_identified_as_official_external_link(caplog):
+def test_82526_empty_detail_api_uses_allowlisted_external_content(caplog):
     session = Session(
         [
             Response(
@@ -201,25 +235,70 @@ def test_82526_empty_detail_api_is_identified_as_official_external_link(caplog):
                     },
                 }
             )
-        ]
+        ],
+        [Response(text=ANNOUNCEMENT_82526_EXTERNAL_PAGE)],
     )
 
     with caplog.at_level(logging.INFO):
-        with pytest.raises(
-            ExternalAnnouncementWithoutBodyError,
-            match="Official external-link announcement has no inline content",
-        ):
-            fetch_announcement_detail(
-                external_landing_page_item(),
-                timeout=1,
-                user_agent="test",
-                session=session,
-            )
+        detail = fetch_announcement_detail(
+            external_landing_page_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
 
     assert len(session.post_calls) == 1
-    assert not session.get_calls
+    assert len(session.get_calls) == 1
+    assert detail.plain_text.startswith("📌 活動說明")
+    assert "每組帳號僅能進行一次綁定" in detail.plain_text
+    assert (
+        "[《新楓之谷》VIP系統介紹網頁]"
+        "(https://maplestory-event.beanfun.com/eventad/eventad?eventadid=12590)"
+        in detail.plain_text
+    )
+    assert "⚠️ 注意事項" in detail.plain_text
+    assert "2026/11/06(含)前綁定" in detail.plain_text
+    assert "{{ info.classicAccount }}" not in detail.plain_text
+    assert "登入帳號並進行綁定" not in detail.plain_text
+    assert "網站導覽" not in detail.plain_text
+    assert "選擇新楓之谷帳號" not in detail.plain_text
     assert "Detail API Content Length=0" in caplog.text
-    assert "official external-link announcement" in caplog.text.casefold()
+    assert (
+        "HTML selector=external:.explain-article+.notify-article"
+        in caplog.text
+    )
+
+
+def test_82526_missing_allowlisted_external_content_uses_safe_link_only_error():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "82526",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ],
+        [Response(text=FULL_PAGE_TEMPLATE)],
+    )
+
+    with pytest.raises(
+        ExternalAnnouncementWithoutBodyError,
+        match="Official external-link announcement has no supported inline content",
+    ):
+        fetch_announcement_detail(
+            external_landing_page_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
 
 
 def test_82279_detail_api_html_fragment_is_parsed_without_container_or_fallback(caplog):
