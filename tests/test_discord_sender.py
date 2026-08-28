@@ -844,6 +844,30 @@ def test_normal_204_success_payload_and_mentions():
     assert session.closed is False
 
 
+def test_82528_body_that_fits_discord_limit_uses_one_embed():
+    item = Announcement(
+        "82528",
+        "更新",
+        "新楓之谷：經典版 《0827(四)V001 初心啟航 例行維護開機公告》",
+        "2026/08/27",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82528",
+    )
+    content = "\n".join(
+        f"例行維護項目 {index:03d}：本項更新內容已完成。"
+        for index in range(165)
+    )
+    assert 3500 < len(content) < 3800
+
+    payloads = build_announcement_payloads(item, blocks=(TextBlock(content),))
+
+    assert len(payloads) == 1
+    assert len(payloads[0]["embeds"]) == 1
+    embed = payloads[0]["embeds"][0]
+    assert len(embed["description"]) <= MAX_DESCRIPTION_LENGTH
+    assert embed["footer"]["text"].endswith("公告 ID：82528")
+    validate_announcement_payloads(item, payloads)
+
+
 def test_history_mode_adds_history_footer_line_only():
     session = FakeSession([FakeResponse(204)])
     send_announcement(WEBHOOK, announcement(), user_agent="test", history_mode=True, session=session)
