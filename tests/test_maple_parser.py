@@ -1,7 +1,15 @@
 import pytest
 import requests
 
-from maple_parser import MAX_PAGES, MapleParserError, fetch_announcements, parse_api_response
+from maple_parser import (
+    ANNOUNCEMENT_API_URL,
+    BASE_URL,
+    MAX_ATTEMPTS,
+    MAX_PAGES,
+    MapleParserError,
+    fetch_announcements,
+    parse_api_response,
+)
 
 
 def payload(rows, total_page=1, code=1):
@@ -27,9 +35,11 @@ def row(announcement_id="1", category="760", url_link=None):
 
 
 class FakeResponse:
-    def __init__(self, body=None, error=None):
+    def __init__(self, body=None, error=None, status_code=200, headers=None):
         self.body = body
         self.error = error
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.error:
@@ -77,6 +87,100 @@ def test_fetches_multiple_pages_and_deduplicates_in_api_order():
     assert [item.announcement_id for item in items] == ["3", "2", "1"]
     assert len(session.calls) == 2
     assert session.closed is False
+
+
+def test_transient_403_is_retried_with_official_request_headers(caplog):
+    session = FakeSession(
+        [
+            FakeResponse(
+                error=requests.HTTPError("403 Forbidden"),
+                status_code=403,
+            ),
+            FakeResponse(payload([row("1")])),
+        ]
+    )
+    sleeps = []
+
+    items = fetch_announcements(
+        user_agent="test-agent",
+        session=session,
+        sleep=sleeps.append,
+    )
+
+    assert [item.announcement_id for item in items] == ["1"]
+    assert sleeps == [1.0]
+    assert len(session.calls) == 2
+    args, kwargs = session.calls[0]
+    assert args == (ANNOUNCEMENT_API_URL,)
+    assert kwargs["headers"]["Origin"] == BASE_URL
+    assert kwargs["headers"]["Referer"] == f"{BASE_URL}/bulletin"
+    assert kwargs["headers"]["Accept-Language"].startswith("zh-TW")
+    assert "status=403" in caplog.text
+    assert "attempt=1/3" in caplog.text
+
+
+def test_429_retry_after_is_respected_and_bounded():
+    session = FakeSession(
+        [
+            FakeResponse(
+                error=requests.HTTPError("429 Too Many Requests"),
+                status_code=429,
+                headers={"Retry-After": "90"},
+            ),
+            FakeResponse(payload([row("1")])),
+        ]
+    )
+    sleeps = []
+
+    assert fetch_announcements(
+        user_agent="test",
+        session=session,
+        sleep=sleeps.append,
+    )
+    assert sleeps == [30.0]
+
+
+def test_retryable_failure_stops_after_max_attempts():
+    session = FakeSession(
+        [
+            FakeResponse(
+                error=requests.HTTPError("403 Forbidden"),
+                status_code=403,
+            )
+            for _ in range(MAX_ATTEMPTS)
+        ]
+    )
+    sleeps = []
+
+    with pytest.raises(MapleParserError, match="403 Forbidden"):
+        fetch_announcements(
+            user_agent="test",
+            session=session,
+            sleep=sleeps.append,
+        )
+
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0]
+
+
+def test_non_retryable_400_fails_without_retry():
+    session = FakeSession(
+        [
+            FakeResponse(
+                error=requests.HTTPError("400 Bad Request"),
+                status_code=400,
+            )
+        ]
+    )
+
+    with pytest.raises(MapleParserError, match="400 Bad Request"):
+        fetch_announcements(
+            user_agent="test",
+            session=session,
+            sleep=lambda _delay: pytest.fail("must not retry"),
+        )
+
+    assert len(session.calls) == 1
 
 
 @pytest.mark.parametrize(

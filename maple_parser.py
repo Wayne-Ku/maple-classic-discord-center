@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -12,6 +15,10 @@ BASE_URL = "https://maplestoryclassic.beanfun.com"
 ANNOUNCEMENT_API_URL = f"{BASE_URL}/api/Bulletin/FindBulletin"
 CATEGORY_NAMES = {"760": "活動", "759": "更新", "758": "重要"}
 MAX_PAGES = 100
+MAX_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 30.0
+RETRYABLE_STATUS_CODES = frozenset({403, 429, 500, 502, 503, 504})
+LOGGER = logging.getLogger("maple-classic-discord-center")
 
 
 class MapleParserError(RuntimeError):
@@ -93,15 +100,70 @@ def parse_api_response(payload: dict[str, Any]) -> tuple[list[Announcement], int
     return announcements, total_pages
 
 
+def _retry_delay(response: object, attempt: int) -> float:
+    headers = getattr(response, "headers", None)
+    raw_retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if raw_retry_after is not None:
+        try:
+            return min(max(float(raw_retry_after), 0.0), MAX_RETRY_AFTER_SECONDS)
+        except (TypeError, ValueError):
+            pass
+    return float(2 ** (attempt - 1))
+
+
+def _fetch_page_response(
+    client: requests.Session,
+    *,
+    page: int,
+    headers: dict[str, str],
+    timeout: float,
+    sleep: Callable[[float], None],
+) -> requests.Response:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        response = client.post(
+            ANNOUNCEMENT_API_URL,
+            json={"pageSize": 50, "kind": 0, "page": page, "method": 6},
+            headers=headers,
+            timeout=timeout,
+        )
+        status_code = getattr(response, "status_code", None)
+        if (
+            status_code in RETRYABLE_STATUS_CODES
+            and attempt < MAX_ATTEMPTS
+        ):
+            delay = _retry_delay(response, attempt)
+            LOGGER.warning(
+                "官網公告 API 暫時拒絕請求，將重試："
+                "page=%d status=%s attempt=%d/%d retry_in=%.1fs",
+                page,
+                status_code,
+                attempt,
+                MAX_ATTEMPTS,
+                delay,
+            )
+            sleep(delay)
+            continue
+        response.raise_for_status()
+        return response
+    raise AssertionError("announcement API retry loop ended unexpectedly")
+
+
 def fetch_announcements(
-    *, timeout: float = 15, user_agent: str, session: requests.Session | None = None
+    *,
+    timeout: float = 15,
+    user_agent: str,
+    session: requests.Session | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[Announcement]:
     client = session or requests.Session()
     owns_session = session is None
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
         "Content-Type": "application/json",
+        "Origin": BASE_URL,
+        "Referer": f"{BASE_URL}/bulletin",
     }
     all_items: list[Announcement] = []
     page = 1
@@ -109,13 +171,13 @@ def fetch_announcements(
 
     try:
         while page <= total_pages:
-            response = client.post(
-                ANNOUNCEMENT_API_URL,
-                json={"pageSize": 50, "kind": 0, "page": page, "method": 6},
+            response = _fetch_page_response(
+                client,
+                page=page,
                 headers=headers,
                 timeout=timeout,
+                sleep=sleep,
             )
-            response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError as exc:
