@@ -199,7 +199,10 @@ def _is_sanction_list_table(table: Tag) -> bool:
         re.sub(r"\s+", "", cell.get_text(" ", strip=True))
         for cell in _direct_table_cells(first_row)
     }
-    return _SANCTION_TABLE_HEADERS.issubset(headers)
+    return (
+        _SANCTION_TABLE_HEADERS.issubset(headers)
+        or headers == {"角色名稱"}
+    )
 
 
 def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:

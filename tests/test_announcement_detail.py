@@ -186,6 +186,24 @@ def announcement_82309_content(row_count=3):
     )
 
 
+def announcement_82614_content():
+    return (
+        "<p>親愛的冒險者們：</p>"
+        "<p>以下帳號因嚴重違反遊戲規章，已執行「永久鎖定」處分。</p>"
+        "<p>處置對象角色數量：共4,217名</p>"
+        "<table><thead><tr><th colspan='5'>角色名稱</th></tr></thead>"
+        "<tbody>"
+        "<tr><td>不應顯示甲</td><td>不應顯示乙</td><td>不應顯示丙</td>"
+        "<td>不應顯示丁</td><td>不應顯示戊</td></tr>"
+        "<tr><td>不應顯示己</td><td>不應顯示庚</td><td>不應顯示辛</td>"
+        "<td>不應顯示壬</td><td>不應顯示癸</td></tr>"
+        "</tbody></table>"
+        "<p>營運團隊重申與叮嚀：</p>"
+        "<p>請冒險者切勿使用任何非官方授權之輔助程式。</p>"
+        "<p>《新楓之谷：經典版》營運團隊 敬上</p>"
+    )
+
+
 def sanction_announcement(title="新楓之谷：經典版《0804(二)遊戲異常行為制裁公告》"):
     return Announcement(
         "82309",
@@ -376,6 +394,36 @@ def test_82309_sanction_announcement_omits_account_list_table(caplog):
     assert "不應顯示角色" not in detail.plain_text
     assert "Sanction list table omitted: rows=3" in caplog.text
     assert not session.get_calls
+
+
+def test_82614_sanction_announcement_omits_multi_name_account_table(caplog):
+    content = announcement_82614_content()
+    session = Session(
+        [Response({"data": {"myDataSet": {"table": {"content": content}}}})]
+    )
+    announcement = Announcement(
+        "82614",
+        "重要",
+        "新楓之谷：經典版《0903(四)遊戲異常行為制裁公告》",
+        "2026/09/04",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82614",
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            announcement,
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert "以下帳號因嚴重違反遊戲規章" in detail.plain_text
+    assert "處置對象角色數量：共4,217名" in detail.plain_text
+    assert "營運團隊重申與叮嚀：" in detail.plain_text
+    assert detail.plain_text.endswith("《新楓之谷：經典版》營運團隊 敬上")
+    assert "角色名稱" not in detail.plain_text
+    assert "不應顯示" not in detail.plain_text
+    assert "Sanction list table omitted: rows=2" in caplog.text
 
 
 @pytest.mark.parametrize(
