@@ -125,6 +125,11 @@ def _absolute_http_url(value: object, base_url: str) -> str | None:
     return resolved if parsed.scheme in {"http", "https"} and parsed.netloc else None
 
 
+def _discord_link_text(label: str, href: str) -> str:
+    """Avoid masked-link syntax when the visible label is already the URL."""
+    return href if label.strip() == href else f"[{label or href}]({href})"
+
+
 def _is_tiny_dimension(value: object) -> bool:
     match = re.search(r"\d+", str(value or ""))
     return bool(match and int(match.group()) <= 1)
@@ -325,7 +330,7 @@ def _detail_from_html(
                 if href and href not in seen_links:
                     seen_links.add(href)
                     links.append(href)
-                    parts.append(f"[{label or href}]({href})")
+                    parts.append(_discord_link_text(label, href))
                 else:
                     parts.append(label)
                 return
@@ -368,7 +373,7 @@ def _detail_from_html(
             if href and href not in seen_links:
                 seen_links.add(href)
                 links.append(href)
-                text_parts.append(f"[{label or href}]({href})")
+                text_parts.append(_discord_link_text(label, href))
             else:
                 text_parts.append(label)
             text_parts.append("\n")

@@ -161,6 +161,24 @@ def test_unknown_host_link_does_not_get_a_guessed_icon():
     assert result == "[一般連結](https://example.com/path)"
 
 
+def test_bare_support_url_stays_clickable_once_in_payload():
+    support_url = "https://games.crm.gamania.com/hc/zh-tw/requests/new"
+    session = FakeSession([FakeResponse(204)])
+
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        content=f"遊戲橘子問題回報中心：\n{support_url}",
+        session=session,
+    )
+
+    description = session.calls[0][1]["json"]["embeds"][0]["description"]
+    assert description.count(support_url) == 1
+    assert f"[{support_url}]" not in description
+    assert f"({support_url})" not in description
+
+
 class FakeResponse:
     def __init__(self, status_code=204, text="", json_body=None):
         self.status_code = status_code

@@ -561,10 +561,10 @@ def test_82242_uses_official_legacy_detail_api_and_preserves_content_link():
     assert "今日 14:00～14:40" in detail.plain_text
     assert "我們預計 15:45～16:00" in detail.plain_text
     assert "電話服務專線：(02)2192-6100（請按 2）" in detail.plain_text
-    assert (
-        "[https://games.crm.gamania.com/hc/zh-tw/requests/new]"
-        "(https://games.crm.gamania.com/hc/zh-tw/requests/new)"
-    ) in detail.plain_text
+    support_url = "https://games.crm.gamania.com/hc/zh-tw/requests/new"
+    assert detail.plain_text.count(support_url) == 1
+    assert f"[{support_url}]" not in detail.plain_text
+    assert f"({support_url})" not in detail.plain_text
     assert "遊戲橘子客服中心 敬上" in detail.plain_text
     assert all(
         value.casefold() not in detail.plain_text.casefold()
@@ -872,6 +872,22 @@ def test_html_anchors_become_markdown_and_duplicate_urls_are_removed():
     )
     assert detail.plain_text == "[官方連結](https://example.com/portal)\n重複連結\n不安全連結"
     assert detail.links == ("https://example.com/portal",)
+
+
+def test_url_label_anchor_is_kept_once_as_clickable_bare_url():
+    support_url = "https://games.crm.gamania.com/hc/zh-tw/requests/new"
+    html = f'<p>遊戲橘子問題回報中心：</p><p><a href="{support_url}">{support_url}</a></p>'
+    detail = fetch_announcement_detail(
+        item(),
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+
+    assert detail.plain_text == f"遊戲橘子問題回報中心：\n{support_url}"
+    assert detail.plain_text.count(support_url) == 1
+    assert f"[{support_url}]" not in detail.plain_text
+    assert detail.links == (support_url,)
 
 
 def test_wrapped_anchor_brackets_are_removed_without_touching_normal_brackets():
