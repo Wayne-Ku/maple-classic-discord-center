@@ -6,6 +6,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from html import escape
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
@@ -16,6 +17,9 @@ from maple_parser import Announcement
 
 DETAIL_API_URL = "https://maplestoryclassic.beanfun.com/api/Bulletin/BulletinDetail"
 LEGACY_NEWS_API_URL = "https://gamaapi.beanfun.com/Api/News/GetNewsContent"
+EVENT_AD_DETAIL_API_URL = (
+    "https://maplestoryclassic-event.beanfun.com/api/EventAd/GetDetail"
+)
 MAX_PLAIN_TEXT_LENGTH = 500_000
 LOGGER = logging.getLogger("maple-classic-discord-center")
 
@@ -539,6 +543,146 @@ def _legacy_news_parameters(url: str) -> tuple[str, str] | None:
     return news_id, service_id
 
 
+def _event_ad_parameters(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if (
+        (parsed.hostname or "").casefold()
+        != "maplestoryclassic-event.beanfun.com"
+        or parsed.path.rstrip("/").casefold() != "/eventad/eventad"
+    ):
+        return None
+    query = {
+        key.casefold(): values for key, values in parse_qs(parsed.query).items()
+    }
+    event_ad_id = (query.get("eventadid") or [""])[0].strip()
+    return event_ad_id if event_ad_id.isdecimal() else None
+
+
+def _event_ad_heading_is_redundant(value: str, announcement_title: str) -> bool:
+    heading = re.sub(
+        r"\s+",
+        "",
+        BeautifulSoup(value, "html.parser").get_text(" ", strip=True),
+    )
+    title = re.sub(r"\s+", "", announcement_title)
+    return not heading or heading in title
+
+
+def _event_ad_json_detail(
+    payload: Any,
+    *,
+    base_url: str,
+    announcement_title: str,
+) -> tuple[AnnouncementDetail | None, int]:
+    """Parse the data used by the official Vue EventAd page in display order."""
+    if not isinstance(payload, dict) or payload.get("code") not in (1, "1"):
+        return None, 0
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None, 0
+
+    fragments: list[str] = []
+    raw_length = 0
+
+    links = data.get("links")
+    if isinstance(links, list):
+        for item in links:
+            if not isinstance(item, dict):
+                continue
+            link_url = _absolute_http_url(item.get("linkUrl"), base_url)
+            if not link_url:
+                continue
+            link_name = str(item.get("linkName") or link_url).strip()
+            fragments.append(
+                f'<p><a href="{escape(link_url, quote=True)}">'
+                f"{escape(link_name)}</a></p>"
+            )
+            raw_length += len(link_name) + len(link_url)
+
+    events = data.get("event")
+    if isinstance(events, list):
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            main_title = str(item.get("mainTitle") or "").strip()
+            if main_title and not _event_ad_heading_is_redundant(
+                main_title, announcement_title
+            ):
+                fragments.append(f"<h2>{escape(main_title)}</h2>")
+                raw_length += len(main_title)
+
+            start_date = str(item.get("startDate") or "").strip()
+            end_date = str(item.get("endDate") or "").strip()
+            if start_date.startswith("1900-01-01"):
+                start_date = ""
+            if end_date.startswith("2100-12-31"):
+                end_date = ""
+            if start_date or end_date:
+                date_text = " ～ ".join(
+                    value.replace("T", " ")[:16]
+                    for value in (start_date, end_date)
+                    if value
+                )
+                fragments.append(f"<p>活動時間：{escape(date_text)}</p>")
+                raw_length += len(date_text)
+
+            main_pic = _absolute_http_url(item.get("mainPic"), base_url)
+            if main_pic and not urlsplit(main_pic).path.endswith("/"):
+                fragments.append(
+                    f'<img src="{escape(main_pic, quote=True)}">'
+                )
+                raw_length += len(main_pic)
+
+    topics = data.get("topics")
+    if isinstance(topics, list):
+        for item in topics:
+            if not isinstance(item, dict):
+                continue
+            topic_name = str(item.get("topicName") or "").strip()
+            if topic_name and not _event_ad_heading_is_redundant(
+                topic_name, announcement_title
+            ):
+                topic_heading = BeautifulSoup(
+                    topic_name, "html.parser"
+                ).get_text(" ", strip=True)
+                fragments.append(f"<h2>{escape(topic_heading)}</h2>")
+                raw_length += len(topic_name)
+
+            topic_content = item.get("topicContent")
+            if not isinstance(topic_content, str) or not topic_content.strip():
+                continue
+            topic_soup = BeautifulSoup(topic_content, "html.parser")
+            for tag in topic_soup(
+                [
+                    "script",
+                    "style",
+                    "noscript",
+                    "nav",
+                    "header",
+                    "footer",
+                    "aside",
+                    "form",
+                ]
+            ):
+                tag.decompose()
+            fragments.append(str(topic_soup))
+            raw_length += len(topic_content)
+
+    if not fragments:
+        return None, raw_length
+    combined_html = "".join(fragments)
+    detail = _usable_detail(
+        _detail_from_html(
+            combined_html,
+            base_url=base_url,
+            omit_sanction_list=_is_sanction_announcement(
+                announcement_title, combined_html
+            ),
+        )
+    )
+    return detail, raw_length
+
+
 def _is_official_external_landing_page(url: str) -> bool:
     parsed = urlsplit(url)
     hostname = (parsed.hostname or "").casefold()
@@ -736,6 +880,53 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
                     return detail
             except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
                 LOGGER.info("Legacy Detail API unavailable: %s", type(exc).__name__)
+
+        event_ad_id = _event_ad_parameters(announcement.url)
+        if event_ad_id is not None:
+            try:
+                LOGGER.info(
+                    "EventAd Detail API URL=%s Announcement ID=%s EventAd ID=%s",
+                    EVENT_AD_DETAIL_API_URL,
+                    announcement.announcement_id,
+                    event_ad_id,
+                )
+                response = client.get(
+                    EVENT_AD_DETAIL_API_URL,
+                    params={"EventADID": event_ad_id},
+                    headers=headers,
+                    timeout=timeout,
+                )
+                LOGGER.info(
+                    "EventAd Detail API HTTP Status Code=%s",
+                    getattr(response, "status_code", "unknown"),
+                )
+                response.raise_for_status()
+                detail, raw_length = _event_ad_json_detail(
+                    response.json(),
+                    base_url=announcement.url,
+                    announcement_title=announcement.title,
+                )
+                LOGGER.info("EventAd Detail API Content Length=%d", raw_length)
+                if detail:
+                    LOGGER.info("EventAd Detail API success")
+                    LOGGER.info("HTML Fallback=False")
+                    LOGGER.info("HTML selector=event-ad-json")
+                    LOGGER.info(
+                        "HTML extracted length=%d", len(detail.plain_text)
+                    )
+                    LOGGER.info(
+                        "Final sent content length=%d", len(detail.plain_text)
+                    )
+                    return detail
+            except (
+                requests.RequestException,
+                ValueError,
+                TypeError,
+                AttributeError,
+            ) as exc:
+                LOGGER.info(
+                    "EventAd Detail API unavailable: %s", type(exc).__name__
+                )
 
         LOGGER.info("HTML Fallback=True")
         response = client.get(announcement.url, headers=headers, timeout=timeout)

@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from announcement_detail import (
+    EVENT_AD_DETAIL_API_URL,
     LEGACY_NEWS_API_URL,
     AnnouncementDetailError,
     ExternalAnnouncementWithoutBodyError,
@@ -59,6 +60,17 @@ def external_landing_page_item():
         "新楓之谷：經典版 《帳號綁定 消費回饋福利連動》",
         "2026/08/27",
         "https://maplestoryclassic-event.beanfun.com/AccountBind/Index",
+    )
+
+
+def event_ad_item(announcement_id="82645", event_ad_id="19111"):
+    return Announcement(
+        announcement_id,
+        "活動",
+        "【菇菇通行證 Season 1】讓冒險一路暢行無阻",
+        "2026/09/10",
+        "https://maplestoryclassic-event.beanfun.com/"
+        f"EventAd/EventAd?eventAdId={event_ad_id}",
     )
 
 
@@ -317,6 +329,139 @@ def test_82526_missing_allowlisted_external_content_uses_safe_link_only_error():
             user_agent="test",
             session=session,
         )
+
+
+def test_82645_uses_official_event_ad_api_and_preserves_order(caplog):
+    topic_content = """
+    <p>活動時間：2026/09/10維護後 ～ 2026/10/15維護前</p>
+    <p>活動資格：所有《新楓之谷：經典版》的角色。</p>
+    <img src="/beanfun/WebImage/pass-reward.png">
+    <p>獎勵內容：</p>
+    <table>
+      <tr><th>道具名稱</th><th>數量</th><th>期限</th></tr>
+      <tr><td>神秘的秘密箱子</td><td>1</td><td>14天</td></tr>
+    </table>
+    <p>《新楓之谷：經典版》營運團隊 敬上</p>
+    """
+    event_payload = {
+        "code": 1,
+        "data": {
+            "event": [
+                {
+                    "mainPic": "https://tw.hicdn.beanfun.com/beanfun/WebImage/",
+                    "mainTitle": "【菇菇通行證 Season 1】",
+                    "startDate": "1900-01-01T00:00:00",
+                    "endDate": "2100-12-31T23:59:00",
+                }
+            ],
+            "topics": [
+                {
+                    "topicName": "【菇菇通行證 Season 1】",
+                    "topicContent": topic_content,
+                }
+            ],
+            "links": [],
+        },
+    }
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {"myDataSet": {"table": {"content": None}}},
+                }
+            )
+        ],
+        [Response(event_payload)],
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            event_ad_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert detail.plain_text.startswith(
+        "活動時間：2026/09/10維護後 ～ 2026/10/15維護前"
+    )
+    assert "🎁 道具獎勵\n\n• 神秘的秘密箱子 ×1｜14天" in detail.plain_text
+    assert detail.plain_text.endswith("《新楓之谷：經典版》營運團隊 敬上")
+    assert "【菇菇通行證 Season 1】" not in detail.plain_text
+    assert detail.images == (
+        "https://maplestoryclassic-event.beanfun.com/"
+        "beanfun/WebImage/pass-reward.png",
+    )
+    assert [type(block) for block in detail.blocks] == [
+        TextBlock,
+        ImageBlock,
+        TextBlock,
+    ]
+    assert len(session.get_calls) == 1
+    assert session.get_calls[0][0][0] == EVENT_AD_DETAIL_API_URL
+    assert session.get_calls[0][1]["params"] == {"EventADID": "19111"}
+    assert "EventAd Detail API success" in caplog.text
+    assert "HTML selector=event-ad-json" in caplog.text
+    assert "HTML Fallback=False" in caplog.text
+
+
+def test_82646_event_ad_table_and_following_text_are_not_lost():
+    event_payload = {
+        "code": 1,
+        "data": {
+            "event": [],
+            "topics": [
+                {
+                    "topicName": "【冒險家戒指】",
+                    "topicContent": """
+                    <p>任務概要：解開戒指的秘密。</p>
+                    <table>
+                      <tr><th>道具名稱</th><th>道具效果</th><th>備註</th></tr>
+                      <tr>
+                        <td>冒險家的戒指-生命</td>
+                        <td>HP+500</td>
+                        <td>可透過指定 NPC 交換。</td>
+                      </tr>
+                    </table>
+                    <p>注意事項</p>
+                    """,
+                }
+            ],
+            "links": [],
+        },
+    }
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {"myDataSet": {"table": {"content": ""}}},
+                }
+            )
+        ],
+        [Response(event_payload)],
+    )
+    item = Announcement(
+        "82646",
+        "更新",
+        "【冒險家戒指】解開神秘戒指中蘊含的生命力吧！",
+        "2026/09/10",
+        "https://maplestoryclassic-event.beanfun.com/"
+        "EventAd/EventAd?eventAdId=19112",
+    )
+
+    detail = fetch_announcement_detail(
+        item, timeout=1, user_agent="test", session=session
+    )
+
+    assert "任務概要：解開戒指的秘密。" in detail.plain_text
+    assert (
+        "• 道具名稱：冒險家的戒指-生命\n"
+        "  道具效果：HP+500\n"
+        "  備註：可透過指定 NPC 交換。"
+    ) in detail.plain_text
+    assert detail.plain_text.endswith("注意事項")
 
 
 def test_82279_detail_api_html_fragment_is_parsed_without_container_or_fallback(caplog):
