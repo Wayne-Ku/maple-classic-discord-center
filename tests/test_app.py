@@ -3,7 +3,11 @@ from pathlib import Path
 
 import app
 import pytest
-from announcement_detail import AnnouncementDetail, TextBlock
+from announcement_detail import (
+    AnnouncementDetail,
+    ExternalAnnouncementWithoutBodyError,
+    TextBlock,
+)
 from config import Config
 from maple_parser import Announcement
 from state_store import AnnouncementState, load_sent_ids, load_state, save_state
@@ -213,7 +217,7 @@ def test_detail_failure_does_not_send_or_update_state(monkeypatch, tmp_path, cap
     assert "reason=missing" in caplog.text
 
 
-def test_official_external_link_without_body_sends_header_only_and_records_state(
+def test_official_external_link_without_body_does_not_send_or_record_state(
     monkeypatch, tmp_path, caplog
 ):
     path = tmp_path / "state.json"
@@ -233,28 +237,27 @@ def test_official_external_link_without_body_sends_header_only_and_records_state
         app,
         "fetch_announcement_detail",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            app.ExternalAnnouncementWithoutBodyError("no inline content")
+            ExternalAnnouncementWithoutBodyError("no inline content")
         ),
     )
-    calls = []
-
-    def send(_url, sent_item, **kwargs):
-        calls.append((sent_item, kwargs))
-        return ("1542541739292753996",)
-
-    monkeypatch.setattr(app, "send_announcement", send)
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda *_args, **_kwargs: pytest.fail("must not send"),
+    )
 
     with caplog.at_level(logging.WARNING):
-        assert app.run(make_config(path)) == 0
+        with pytest.raises(
+            app.AnnouncementDetailError, match="no inline content"
+        ):
+            app.run(make_config(path))
 
-    assert len(calls) == 1
-    assert calls[0][0] == item
-    assert calls[0][1]["blocks"] == ()
     state = load_state(path)
     assert state is not None
-    assert state.sent_ids == {"1", "82526"}
-    assert state.discord_message_ids["82526"] == ("1542541739292753996",)
-    assert "改以標題連結安全發送" in caplog.text
+    assert state.sent_ids == {"1"}
+    assert "82526" not in state.discord_message_ids
+    assert "公告正文解析失敗" in caplog.text
+    assert "ID=82526" in caplog.text
 
 
 def test_each_new_announcement_fetches_detail_once(monkeypatch, tmp_path):

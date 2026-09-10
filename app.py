@@ -7,7 +7,6 @@ import sys
 
 from announcement_detail import (
     AnnouncementDetailError,
-    ExternalAnnouncementWithoutBodyError,
     fetch_announcement_detail,
 )
 from config import Config
@@ -33,14 +32,6 @@ def _send(config: Config, item: Announcement) -> tuple[str, ...]:
         detail = fetch_announcement_detail(
             item, timeout=config.request_timeout, user_agent=config.user_agent
         )
-    except ExternalAnnouncementWithoutBodyError:
-        LOGGER.warning(
-            "官方外部連結公告沒有內嵌正文，改以標題連結安全發送："
-            "ID=%s title=%s",
-            item.announcement_id,
-            item.title,
-        )
-        detail = None
     except AnnouncementDetailError as exc:
         LOGGER.warning(
             "公告正文解析失敗：ID=%s title=%s reason=%s",
