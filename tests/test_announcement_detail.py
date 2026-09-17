@@ -15,6 +15,7 @@ from announcement_detail import (
     fetch_announcement_detail,
     is_template_garbage,
 )
+from discord_sender import build_announcement_payloads
 from maple_parser import Announcement
 
 
@@ -1017,6 +1018,67 @@ def test_html_anchors_become_markdown_and_duplicate_urls_are_removed():
     )
     assert detail.plain_text == "[官方連結](https://example.com/portal)\n重複連結\n不安全連結"
     assert detail.links == ("https://example.com/portal",)
+
+
+def test_82693_anchor_wrapped_images_become_ordered_embeds_not_text_links():
+    image_one = (
+        "https://tw.hicdn.beanfun.com/beanfun/WebImage/1789641902903.jpg"
+    )
+    image_two = (
+        "https://tw.hicdn.beanfun.com/beanfun/WebImage/1789641706917.jpg"
+    )
+    event_url = (
+        "https://maplestoryclassic-event.beanfun.com/"
+        "EventAd/EventAd?eventAdId=17816"
+    )
+    html = (
+        "<p>記憶音樂盒活動說明</p>"
+        f'<a href="{image_one}"><img src="{image_one}" alt=""></a>'
+        f'<a href="{image_two}"><u><img src="{image_two}" alt=""></u></a>'
+        "<p>注意事項：</p>"
+        f'<p>詳細內容請參考<a href="{event_url}">機率商品說明</a></p>'
+    )
+    announcement = Announcement(
+        "82693",
+        "活動",
+        "【記憶音樂盒】便當熟客、迷你三色海豚",
+        "2026/09/17",
+        "https://maplestoryclassic.beanfun.com/bulletin?Bid=82693",
+    )
+
+    detail = fetch_announcement_detail(
+        announcement,
+        timeout=1,
+        user_agent="test",
+        session=Session([Response({"data": {"content": html}})]),
+    )
+    payloads = build_announcement_payloads(
+        announcement,
+        blocks=detail.blocks,
+    )
+
+    assert detail.images == (image_one, image_two)
+    assert detail.links == (event_url,)
+    assert detail.blocks == (
+        TextBlock("記憶音樂盒活動說明"),
+        ImageBlock(image_one),
+        ImageBlock(image_two),
+        TextBlock(
+            "注意事項：\n"
+            f"詳細內容請參考[機率商品說明]({event_url})"
+        ),
+    )
+    assert image_one not in detail.plain_text
+    assert image_two not in detail.plain_text
+    assert len(payloads) == 1
+    embeds = payloads[0]["embeds"]
+    assert len(embeds) == 4
+    assert embeds[1] == {"image": {"url": image_one}}
+    assert embeds[2] == {"image": {"url": image_two}}
+    assert image_one not in embeds[0]["description"]
+    assert image_two not in embeds[3]["description"]
+    assert "機率商品說明" in embeds[3]["description"]
+    assert embeds[3]["footer"]["text"].endswith("公告 ID：82693")
 
 
 def test_wrapped_anchor_brackets_are_removed_without_touching_normal_brackets():
