@@ -367,6 +367,10 @@ def _detail_from_html(
                 blocks.append(ImageBlock(image_url))
             return
         if node.name == "a":
+            if node.find("img") is not None:
+                for child in node.children:
+                    visit(child)
+                return
             label = node.get_text(" ", strip=True)
             href = _absolute_http_url(node.get("href"), base_url)
             if href and href not in seen_links:
@@ -391,6 +395,18 @@ def _detail_from_html(
     for child in soup.contents:
         visit(child)
     flush_text()
+    expected_images = {
+        image_url
+        for image in soup.find_all("img")
+        if image.find_parent("table") is None
+        and (image_url := _absolute_http_url(image.get("src"), base_url))
+        and _is_content_image(image, image_url)
+    }
+    missing_images = expected_images - seen_images
+    if missing_images:
+        raise AnnouncementDetailError(
+            "Official announcement content images were not preserved"
+        )
     plain_text = "\n".join(
         block.text for block in blocks if isinstance(block, TextBlock)
     ).strip()
