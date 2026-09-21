@@ -2,7 +2,8 @@ name: Check Maple Classic announcements
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Keep the 15-minute cadence off common quarter-hour load peaks.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       test_mode:
