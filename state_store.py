@@ -127,11 +127,11 @@ def save_state(path: Path, state: AnnouncementState) -> None:
             suffix=".tmp",
             delete=False,
         ) as temporary:
+            temporary_name = temporary.name
             json.dump(payload, temporary, ensure_ascii=False, indent=2)
             temporary.write("\n")
             temporary.flush()
             os.fsync(temporary.fileno())
-            temporary_name = temporary.name
         os.replace(temporary_name, path)
     except OSError as exc:
         if temporary_name:

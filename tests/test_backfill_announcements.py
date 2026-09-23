@@ -194,8 +194,11 @@ def test_backfill_and_normal_flow_build_the_same_ordered_embed_structure(monkeyp
     payloads = []
 
     class SuccessfulResponse:
-        status_code = 204
+        status_code = 200
         text = ""
+
+        def json(self):
+            return {"id": "1234567890"}
 
     class PayloadSession:
         def post(self, _url, **kwargs):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ class Config:
     maple_thumbnail_url: str | None = None
     discord_spacer_emoji: str | None = None
     discord_bot_token: str | None = None
+    require_existing_state: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -63,8 +65,8 @@ class Config:
             timeout = float(timeout_raw)
         except ValueError as exc:
             raise ValueError("REQUEST_TIMEOUT 必須是數字。") from exc
-        if timeout <= 0:
-            raise ValueError("REQUEST_TIMEOUT 必須大於 0。")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("REQUEST_TIMEOUT 必須是大於 0 的有限數字。")
 
         return cls(
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL") or None,
@@ -82,4 +84,5 @@ class Config:
             ),
             discord_bot_token=(os.getenv("DISCORD_BOT_TOKEN") or "").strip()
             or None,
+            require_existing_state=_as_bool(os.getenv("REQUIRE_EXISTING_STATE")),
         )

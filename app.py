@@ -11,6 +11,7 @@ from announcement_detail import (
 )
 from config import Config
 from discord_sender import (
+    DiscordPayloadError,
     DiscordSendError,
     delete_announcement_messages,
     send_announcement,
@@ -148,6 +149,11 @@ def run(config: Config) -> int:
     state = load_state(config.state_file)
 
     if state is None:
+        if config.require_existing_state:
+            raise StateStoreError(
+                "找不到既有狀態檔；為避免漏送，停止執行。"
+                "請恢復狀態備份；首次部署才使用 initialize_state 建立基準。"
+            )
         if not config.test_mode:
             save_state(
                 config.state_file,
@@ -184,15 +190,31 @@ def run(config: Config) -> int:
         return 0
 
     # API is newest-first; send oldest-first for a natural Discord timeline.
+    first_item_error: AnnouncementDetailError | DiscordPayloadError | None = None
+    failed_count = 0
     for item in reversed(new_items):
         LOGGER.info("正在發送公告 %s：%s", item.announcement_id, item.title)
-        message_ids = _send(config, item)
+        try:
+            message_ids = _send(config, item)
+        except (AnnouncementDetailError, DiscordPayloadError) as exc:
+            # Keep failed IDs pending without starving independent announcements.
+            failed_count += 1
+            if first_item_error is None:
+                first_item_error = exc
+            LOGGER.warning(
+                "公告處理失敗，保留待重試並繼續下一篇：ID=%s reason=%s",
+                item.announcement_id, exc,
+            )
+            continue
         state.sent_ids.add(item.announcement_id)
         if message_ids:
             state.discord_message_ids[item.announcement_id] = message_ids
         state.missing_checks.pop(item.announcement_id, None)
         save_state(config.state_file, state)
         LOGGER.info("公告 %s 發送成功並已記錄。", item.announcement_id)
+    if first_item_error is not None:
+        LOGGER.error("本次有 %d 篇公告待重試；其餘成功公告已保存。", failed_count)
+        raise first_item_error
     return 0
 
 

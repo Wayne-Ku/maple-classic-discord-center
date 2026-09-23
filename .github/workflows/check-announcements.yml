@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      initialize_state:
+        description: "Initialize missing state only (skips existing announcement history)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +68,7 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
           STATE_FILE: data/state.json
+          REQUIRE_EXISTING_STATE: ${{ github.event_name == 'workflow_dispatch' && inputs.initialize_state && 'false' || 'true' }}
         run: python app.py
 
       - name: Detect state changes
@@ -72,6 +78,7 @@ jobs:
         run: |
           if [[ -f data/state.json ]]; then
             state_hash=$(sha256sum data/state.json | awk '{print $1}')
+            python -c "from pathlib import Path; from state_store import load_state; load_state(Path('data/state.json'))"
             echo "sha256=$state_hash" >> "$GITHUB_OUTPUT"
             if [[ "${{ steps.state_before.outputs.exists }}" != "true" || "$state_hash" != "${{ steps.state_before.outputs.sha256 }}" ]]; then
               echo "changed=true" >> "$GITHUB_OUTPUT"
