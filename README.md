@@ -101,6 +101,8 @@ python app.py
 
 第一次正常執行只會把目前所有公告寫入 `data/state.json` 作為基準，不會洗歷史公告。往後只推播新增公告。設定 Bot Token 時，每篇公告只有在 Discord 成功接收並發布後才會原子更新狀態檔；發送或發布失敗的公告都不會被標記為已完成。
 
+Webhook 使用 `wait=true`，必須取得有效的 Discord 訊息 ID 才視為送達。正文解析失敗或單篇 payload 遭拒時，不發送不完整替代內容、不標記該篇完成，繼續處理其他公告，最後仍以失敗狀態提醒下次重試。連線、認證與限流等共通錯誤仍會停止本次執行。伺服器要求等待超過 30 秒時，保留至下次排程，不提早重試。
+
 正常模式也會記錄每篇公告的 Discord message ID。若已推播的公告仍位於官方 API 的目前歷史範圍內、但連續兩次完整檢查都不再出現，程式會以 Webhook 刪除對應的所有 Discord 分段，並從狀態移除該公告。單次缺漏不會刪除；公告重新出現會取消待刪除狀態；刪除失敗會保留狀態並於下次排程重試。`TEST_MODE` 不執行自動刪除。
 
 執行測試：
@@ -112,6 +114,10 @@ python -m pytest
 ## GitHub Actions
 
 Workflow 每 15 分鐘執行一次，也支援手動執行。狀態檔透過 GitHub Actions Cache 跨執行保存，不會 commit 回 repository。
+
+排程要求既有狀態檔，Cache 遺失時會停止，避免默默重建基準而漏送。首次部署可手動勾選 `initialize_state` 建立基準；已有狀態不會被覆蓋。若不是首次部署，應先恢復狀態備份；重新初始化代表跳過目前尚未送出的公告。本機預設仍可首次初始化，長期運作可設定 `REQUIRE_EXISTING_STATE=true`。狀態維持 version 2，保留訊息 ID 與待刪除紀錄，並繼續相容 version 1。
+
+push 與 pull request 另執行 Python 3.11 / 3.12 離線測試，不使用 Discord Secret、不發送訊息。
 
 ### 設定 GitHub Secret
 
@@ -129,10 +135,10 @@ Workflow 從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook，並從 `${{ s
 1. 前往 repository 的 **Actions**。
 2. 選擇 **Check Maple Classic announcements**。
 3. 點選 **Run workflow**。
-4. 首次建議勾選 `test_mode`，會送出最新一篇測試公告。
+4. 首次部署須勾選 `initialize_state`；可同時勾選 `test_mode`，送出最新一篇測試公告。已有狀態時不需重新初始化。
 5. 確認成功後，再以未勾選的正常模式執行一次。
 
-注意：GitHub 排程使用 UTC 表示，但 `*/15 * * * *` 在所有時區都代表每 15 分鐘一次。GitHub 排程可能因平台負載稍有延遲。
+注意：GitHub 排程使用 UTC 表示，目前於每小時第 7、22、37、52 分鐘執行，維持 15 分鐘間隔並避開整刻尖峰。GitHub 排程可能因平台負載延遲。
 
 ## 常見錯誤排除
 
@@ -151,3 +157,4 @@ Workflow 從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook，並從 `${{ s
 - 不要把 `.env`、Webhook URL 或 Bot Token 貼進 issue、log、commit。
 - V1.4 僅同步新公告並選擇性自動發布；不包含公告內容摘要或 Discord 指令。
 - 程式設定合理 timeout 與專用 User-Agent，官網或 Discord 失敗時以非零狀態結束。
+- 訊息送達後回應逾時、分段中途失敗、Cache 保存失敗或工作硬性中止，仍可能造成重複推播；目前不保證恰好一次送達。保留狀態備份，且本機勿同時啟動多個程序共用同一狀態檔。

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import math
 import time
 from collections.abc import Callable, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -22,6 +23,10 @@ from maple_parser import Announcement
 
 class DiscordSendError(RuntimeError):
     """Raised when Discord does not accept a webhook message."""
+
+
+class DiscordPayloadError(DiscordSendError):
+    """One announcement was rejected; unrelated announcements may proceed."""
 
 
 MAX_ATTEMPTS = 3
@@ -463,8 +468,8 @@ def _payload_limit_error(
     chunk_index: int,
     total_chunks: int,
     reason: str,
-) -> DiscordSendError:
-    return DiscordSendError(
+) -> DiscordPayloadError:
+    return DiscordPayloadError(
         "Discord payload 發送前驗證失敗："
         f"ID={announcement.announcement_id} "
         f"chunk={chunk_index}/{total_chunks} reason={reason}"
@@ -885,8 +890,12 @@ def _response_detail(response: object, *sensitive_values: str) -> str:
 def _retry_after(response: object, fallback: float) -> float:
     try:
         value = float(response.json().get("retry_after"))
-        if value >= 0:
-            return min(value, MAX_RETRY_AFTER_SECONDS)
+        if math.isfinite(value) and value >= 0:
+            if value > MAX_RETRY_AFTER_SECONDS:
+                raise DiscordSendError(
+                    "Discord 限流等待時間超過本次預算，保留至下次排程；不提早重試。"
+                )
+            return value
     except (AttributeError, TypeError, ValueError, requests.RequestException):
         pass
     return min(fallback, MAX_RETRY_AFTER_SECONDS)
@@ -900,7 +909,9 @@ def _discord_message_id(response: object) -> str | None:
     if not isinstance(payload, dict):
         return None
     message_id = payload.get("id")
-    return str(message_id) if message_id is not None else None
+    if isinstance(message_id, str) and message_id.isascii() and message_id.isdecimal():
+        return message_id
+    return None
 
 
 def _discord_channel_id(response: object) -> str | None:
@@ -923,34 +934,42 @@ def _send_payload(
     timeout: float,
     sleep: Callable[[float], None],
 ) -> tuple[str | None, str | None]:
+    parsed_url = urlsplit(webhook_url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed_url.query, keep_blank_values=True)
+        if key != "wait"
+    ]
+    request_url = urlunsplit((
+        parsed_url.scheme, parsed_url.netloc, parsed_url.path, urlencode(query), "",
+    ))
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = client.post(
-                webhook_url,
+                request_url,
                 params={"wait": "true"},
                 json=payload,
                 headers={"User-Agent": user_agent},
                 timeout=timeout,
             )
             status_code = getattr(response, "status_code", None)
-            if status_code is None:
-                response.raise_for_status()
+            if status_code == 200 and _discord_message_id(response):
                 return (
                     _discord_message_id(response),
                     _discord_channel_id(response),
                 )
-            if 200 <= status_code < 300:
-                return (
-                    _discord_message_id(response),
-                    _discord_channel_id(response),
+            if status_code is None or 200 <= status_code < 300:
+                raise DiscordSendError(
+                    "Discord 未回傳有效訊息 ID，無法確認送達；公告不會標記為完成。"
                 )
             retryable = status_code == 429 or status_code in {500, 502, 503, 504}
             if not retryable:
-                raise DiscordSendError(
-                    f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
+                error_type = DiscordPayloadError if status_code == 400 else DiscordSendError
+                raise error_type(
+                    f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url, request_url)}"
                 )
             error = DiscordSendError(
-                f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url)}"
+                f"Discord Webhook 發送失敗：{_response_detail(response, webhook_url, request_url)}"
             )
             delay = (
                 _retry_after(response, float(2 ** (attempt - 1)))
@@ -1194,7 +1213,7 @@ def send_announcement(
                     total_chunks,
                     exc,
                 )
-                raise DiscordSendError(
+                raise type(exc)(
                     "Discord Webhook 分段發送失敗："
                     f"ID={announcement.announcement_id} "
                     f"chunk={chunk_index}/{total_chunks} {exc}"

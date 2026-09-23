@@ -54,7 +54,7 @@ def test_announcement_content_presentation_cleanup_preserves_official_body():
 
 
 def test_payload_body_spacing_matches_compact_82178_layout():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(),
@@ -92,7 +92,7 @@ def test_82273_reward_table_is_readable_in_final_discord_payload():
         "敬祝各位冒險者們遊戲愉快～\n\n"
         "《新楓之谷：經典版》營運團隊 敬上"
     )
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
 
     send_announcement(
         WEBHOOK,
@@ -162,10 +162,10 @@ def test_unknown_host_link_does_not_get_a_guessed_icon():
 
 
 class FakeResponse:
-    def __init__(self, status_code=204, text="", json_body=None):
+    def __init__(self, status_code=200, text="", json_body=None):
         self.status_code = status_code
         self.text = text
-        self.json_body = json_body if json_body is not None else {}
+        self.json_body = json_body if json_body is not None else {"id": "1234567890"}
 
     def json(self):
         return self.json_body
@@ -674,7 +674,7 @@ def test_multi_payload_send_logs_message_ids_and_stops_at_failed_chunk(caplog):
     )
     assert len(payloads) > 1
     session = FakeSession(
-        [FakeResponse(200, json_body={"id": "first-message"}), FakeResponse(400)]
+        [FakeResponse(200, json_body={"id": "1001"}), FakeResponse(400)]
     )
 
     with caplog.at_level("INFO"), pytest.raises(DiscordSendError, match="chunk=2/"):
@@ -688,7 +688,7 @@ def test_multi_payload_send_logs_message_ids_and_stops_at_failed_chunk(caplog):
 
     assert len(session.calls) == 2
     assert all(call[1]["params"] == {"wait": "true"} for call in session.calls)
-    assert "message_id=first-message" in caplog.text
+    assert "message_id=1001" in caplog.text
     assert "Discord chunk failed" in caplog.text
 
 
@@ -751,7 +751,7 @@ def test_get_category_color(category, expected_color):
     ],
 )
 def test_payload_embed_color_matches_category(category, expected_color):
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(category=category),
@@ -787,7 +787,7 @@ def test_get_category_display(category, expected_display):
     ],
 )
 def test_payload_embed_category_matches_category(category, expected_color, expected_display):
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(category=category),
@@ -812,7 +812,7 @@ def test_payload_embed_category_matches_category(category, expected_color, expec
     ],
 )
 def test_payload_embed_title_starts_with_category_icon(category, expected_prefix):
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(title="公告標題", category=category),
@@ -822,8 +822,8 @@ def test_payload_embed_title_starts_with_category_icon(category, expected_prefix
     assert session.calls[0][1]["json"]["embeds"][0]["title"] == f"{expected_prefix}公告標題"
 
 
-def test_normal_204_success_payload_and_mentions():
-    session = FakeSession([FakeResponse(204)])
+def test_confirmed_200_success_payload_and_mentions():
+    session = FakeSession([FakeResponse(200)])
     send_announcement(WEBHOOK, announcement(), user_agent="test", session=session)
     payload = session.calls[0][1]["json"]
     assert "discord" not in payload["username"].lower()
@@ -869,7 +869,7 @@ def test_82528_body_that_fits_discord_limit_uses_one_embed():
 
 
 def test_history_mode_adds_history_footer_line_only():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(WEBHOOK, announcement(), user_agent="test", history_mode=True, session=session)
 
     assert session.calls[0][1]["json"]["embeds"][0]["footer"]["text"] == (
@@ -878,7 +878,7 @@ def test_history_mode_adds_history_footer_line_only():
 
 
 def test_thumbnail_url_adds_embed_author_and_footer_icons():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     thumbnail_url = "https://cdn.example.com/maple-logo"
 
     send_announcement(
@@ -931,7 +931,7 @@ def test_http_400_does_not_retry_or_leak_url():
 
 
 def test_429_retries_using_retry_after():
-    session = FakeSession([FakeResponse(429, json_body={"retry_after": 0.25}), FakeResponse(204)])
+    session = FakeSession([FakeResponse(429, json_body={"retry_after": 0.25}), FakeResponse(200)])
     sleeps = []
     send_announcement(WEBHOOK, announcement(), user_agent="test", session=session, sleep=sleeps.append)
     assert len(session.calls) == 2
@@ -940,7 +940,7 @@ def test_429_retries_using_retry_after():
 
 @pytest.mark.parametrize("status", [500, 502, 503, 504])
 def test_retryable_server_errors_retry(status):
-    session = FakeSession([FakeResponse(status), FakeResponse(204)])
+    session = FakeSession([FakeResponse(status), FakeResponse(200)])
     sleeps = []
     send_announcement(WEBHOOK, announcement(), user_agent="test", session=session, sleep=sleeps.append)
     assert len(session.calls) == 2
@@ -949,7 +949,7 @@ def test_retryable_server_errors_retry(status):
 
 @pytest.mark.parametrize("error", [requests.Timeout("timeout"), requests.ConnectionError("connection")])
 def test_timeout_and_connection_error_retry(error):
-    session = FakeSession([error, FakeResponse(204)])
+    session = FakeSession([error, FakeResponse(200)])
     sleeps = []
     send_announcement(WEBHOOK, announcement(), user_agent="test", session=session, sleep=sleeps.append)
     assert len(session.calls) == 2
@@ -967,7 +967,7 @@ def test_retries_are_limited_and_final_error_is_safe():
 
 
 def test_embed_values_are_safely_truncated():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(title="x" * 300, category="y" * 1100, date="z" * 1100, url="https://example.com/" + "u" * 1100),
@@ -983,7 +983,7 @@ def test_embed_values_are_safely_truncated():
 
 
 def test_embed_title_truncation_preserves_category_icon():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(title="x" * 300, category="活動"),
@@ -997,7 +997,7 @@ def test_embed_title_truncation_preserves_category_icon():
 
 
 def test_owned_session_is_closed(monkeypatch):
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     monkeypatch.setattr("discord_sender.requests.Session", lambda: session)
     send_announcement(WEBHOOK, announcement(), user_agent="test")
     assert session.closed is True
@@ -1048,7 +1048,7 @@ def test_portal_link_blocks_are_unwrapped_with_one_blank_line_before_links():
 
 
 def test_portal_markdown_links_are_in_discord_payload_without_duplicate_urls():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(WEBHOOK, announcement(), user_agent="test", content=portal_content(), session=session)
 
     description = session.calls[0][1]["json"]["embeds"][0]["description"]
@@ -1077,7 +1077,7 @@ def test_long_content_descriptions_do_not_split_markdown_links():
     assert sum(description.count("[") for description in descriptions) == 2
 
 def test_ordered_blocks_send_text_then_images_then_trailing_text():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(),
@@ -1110,7 +1110,7 @@ def test_82176_golden_payload_keeps_footer_after_images_and_short_closing_text()
     )
     image_one = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1784825248264.jpg"
     image_two = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1784754689387.jpg"
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
 
     send_announcement(
         WEBHOOK,
@@ -1150,7 +1150,7 @@ def test_82221_golden_payload_has_clean_unique_markdown_links_and_final_footer()
         "2026/07/28",
         "https://maplestoryclassic.beanfun.com/bulletin?Bid=82221",
     )
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
 
     send_announcement(
         WEBHOOK,
@@ -1181,7 +1181,7 @@ def test_82221_golden_payload_has_clean_unique_markdown_links_and_final_footer()
 
 
 def test_last_image_block_adds_a_footer_only_closing_embed():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(),
@@ -1202,7 +1202,7 @@ def test_last_image_block_adds_a_footer_only_closing_embed():
 
 
 def test_more_than_ten_ordered_embeds_continue_in_a_second_payload_without_loss():
-    session = FakeSession([FakeResponse(204), FakeResponse(204)])
+    session = FakeSession([FakeResponse(200), FakeResponse(200)])
     blocks = (TextBlock("body"),) + tuple(ImageBlock(f"https://cdn.example.com/{index}.jpg") for index in range(12))
     send_announcement(WEBHOOK, announcement(), user_agent="test", blocks=blocks, session=session)
 
@@ -1226,7 +1226,7 @@ def test_more_than_ten_ordered_embeds_continue_in_a_second_payload_without_loss(
 
 
 def test_long_text_block_splits_before_its_following_image_and_trailing_text():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     blocks = (
         TextBlock("a" * 5000),
         ImageBlock("https://cdn.example.com/ordered.jpg"),
@@ -1242,7 +1242,7 @@ def test_long_text_block_splits_before_its_following_image_and_trailing_text():
 
 
 def test_invalid_image_urls_do_not_prevent_text_delivery():
-    session = FakeSession([FakeResponse(204)])
+    session = FakeSession([FakeResponse(200)])
     send_announcement(
         WEBHOOK,
         announcement(),
