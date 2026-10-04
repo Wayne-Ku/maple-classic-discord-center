@@ -1,5 +1,7 @@
 ﻿import logging
 
+import json
+
 import pytest
 import requests
 
@@ -72,6 +74,51 @@ def event_ad_item(announcement_id="82645", event_ad_id="19111"):
         "2026/09/10",
         "https://maplestoryclassic-event.beanfun.com/"
         f"EventAd/EventAd?eventAdId={event_ad_id}",
+    )
+
+
+def gama_event_item():
+    return Announcement(
+        "83849",
+        "活動",
+        "新楓之谷：經典版－《V002覺醒的力量》10/15 強勢登場",
+        "2026/10/02",
+        "https://maplestory-gama-event.beanfun.com/"
+        "index?Url=86C78E44CA42F70C313A5D25FCDEF6E9.4503",
+    )
+
+
+def gama_event_page(*, event_sequence=4503):
+    components = [
+        {
+            "component": "GBg",
+            "content": {
+                "pc": "https://tw.hicdn.beanfun.com/beanfun/WebImage/1790942131914.jpg",
+                "mobile": "https://tw.hicdn.beanfun.com/beanfun/WebImage/1790956896869.jpg",
+            },
+        },
+        {"component": "GText", "content": {"text": ""}},
+        {
+            "component": "GLogo",
+            "content": {
+                "pc": "https://tw.hicdn.beanfun.com/beanfun/WebImage/logo.png"
+            },
+        },
+    ]
+    payload = {
+        "listData": None,
+        "data": {
+            "eventSeq": event_sequence,
+            "detail": json.dumps(components, ensure_ascii=False),
+        },
+        "code": 1,
+        "message": None,
+    }
+    return (
+        "<!doctype html><html><head><title>V002</title></head><body>"
+        f"<script>var json = {json.dumps(payload, ensure_ascii=False)};</script>"
+        '<div id="app"><div class="text-center"></div></div>'
+        "</body></html>"
     )
 
 
@@ -326,6 +373,89 @@ def test_82526_missing_allowlisted_external_content_uses_safe_link_only_error():
     ):
         fetch_announcement_detail(
             external_landing_page_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+
+def test_83849_uses_verified_embedded_event_json_and_sends_main_image(caplog):
+    announcement = gama_event_item()
+    image_url = (
+        "https://tw.hicdn.beanfun.com/beanfun/WebImage/1790942131914.jpg"
+    )
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "83849",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ],
+        [Response(text=gama_event_page())],
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            announcement,
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert len(session.post_calls) == 1
+    assert len(session.get_calls) == 1
+    assert detail.plain_text == ""
+    assert detail.images == (image_url,)
+    assert detail.blocks == (ImageBlock(image_url),)
+    assert "logo.png" not in repr(detail)
+    assert "HTML selector=external:gama-event-json" in caplog.text
+
+    payloads = build_announcement_payloads(
+        announcement,
+        blocks=detail.blocks,
+    )
+    embeds = [embed for payload in payloads for embed in payload["embeds"]]
+    assert [
+        embed["image"]["url"] for embed in embeds if "image" in embed
+    ] == [image_url]
+    assert embeds[-1]["footer"]["text"].endswith("公告 ID：83849")
+
+
+def test_gama_event_page_rejects_mismatched_event_sequence():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "83849",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ],
+        [Response(text=gama_event_page(event_sequence=9999))],
+    )
+
+    with pytest.raises(
+        ExternalAnnouncementWithoutBodyError,
+        match="Official external-link announcement has no supported inline content",
+    ):
+        fetch_announcement_detail(
+            gama_event_item(),
             timeout=1,
             user_agent="test",
             session=session,
