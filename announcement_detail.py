@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -67,6 +68,8 @@ _OFFICIAL_EXTERNAL_CONTENT_SELECTORS = {
         ("⚠️ 注意事項", ".notify-article"),
     ),
 }
+_GAMA_EVENT_HOST = "maplestory-gama-event.beanfun.com"
+_GAMA_EVENT_PATH = "/index"
 
 
 class AnnouncementDetailError(RuntimeError):
@@ -722,11 +725,109 @@ def _detail_api_confirms_empty_inline_content(payload: Any) -> bool:
     return content is None or (isinstance(content, str) and not content.strip())
 
 
+def _gama_event_sequence(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme.casefold() != "https"
+        or (parsed.hostname or "").casefold() != _GAMA_EVENT_HOST
+        or (parsed.path.rstrip("/").casefold() or "/") != _GAMA_EVENT_PATH
+    ):
+        return None
+
+    query = parse_qs(parsed.query)
+    token = next(
+        (
+            values[0].strip()
+            for key, values in query.items()
+            if key.casefold() == "url" and values and values[0].strip()
+        ),
+        "",
+    )
+    match = re.search(r"\.(\d+)$", token)
+    return match.group(1) if match else None
+
+
+def _gama_event_landing_page_detail(
+    html: str,
+    *,
+    base_url: str,
+) -> tuple[AnnouncementDetail | None, str]:
+    """Parse the official event builder's embedded JSON, never its empty SPA body."""
+    event_sequence = _gama_event_sequence(base_url)
+    if event_sequence is None or not isinstance(html, str) or not html.strip():
+        return None, "external-gama-event-invalid"
+
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script"):
+        source = script.string or script.get_text()
+        match = re.fullmatch(
+            r"\s*var\s+json\s*=\s*(\{.*\})\s*;\s*",
+            source,
+            flags=re.DOTALL,
+        )
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group(1))
+            if not isinstance(payload, dict):
+                return None, "external-gama-event-invalid-json"
+            data = payload.get("data")
+            if (
+                payload.get("code") not in (1, "1")
+                or not isinstance(data, dict)
+                or str(data.get("eventSeq")) != event_sequence
+            ):
+                return None, "external-gama-event-mismatch"
+            raw_components = data.get("detail")
+            components = (
+                json.loads(raw_components)
+                if isinstance(raw_components, str)
+                else raw_components
+            )
+        except (TypeError, ValueError):
+            return None, "external-gama-event-invalid-json"
+        if not isinstance(components, list):
+            return None, "external-gama-event-invalid-components"
+
+        fragments: list[str] = []
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            content = component.get("content")
+            if not isinstance(content, dict):
+                continue
+            component_name = component.get("component")
+            if component_name == "GBg":
+                image_url = _absolute_http_url(
+                    content.get("pc") or content.get("mobile"), base_url
+                )
+                if image_url:
+                    fragments.append(
+                        f'<img src="{escape(image_url, quote=True)}">'
+                    )
+            elif component_name == "GText":
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    fragments.append(text)
+
+        if not fragments:
+            return None, "external-gama-event-empty"
+        detail = _usable_detail(
+            _detail_from_html("".join(fragments), base_url=base_url)
+        )
+        return detail, "external:gama-event-json"
+
+    return None, "external-gama-event-json-not-found"
+
+
 def _official_external_landing_page_detail(
     html: str,
     *,
     base_url: str,
 ) -> tuple[AnnouncementDetail | None, str]:
+    if _gama_event_sequence(base_url) is not None:
+        return _gama_event_landing_page_detail(html, base_url=base_url)
+
     parsed_url = urlsplit(base_url)
     key = (
         (parsed_url.hostname or "").casefold(),
