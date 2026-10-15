@@ -1,6 +1,7 @@
 ﻿import pytest
 import requests
 import re
+import json
 
 from announcement_detail import ImageBlock, TextBlock
 from discord_sender import (
@@ -9,8 +10,10 @@ from discord_sender import (
     MAX_DESCRIPTION_LENGTH,
     MAX_EMBED_FIELD_VALUE_LENGTH,
     MAX_MESSAGE_EMBED_TEXT_LENGTH,
+    MAX_WEBHOOK_JSON_BYTES,
     _embed_text_length,
     _format_announcement_content,
+    _payload_json_size,
     build_announcement_payloads,
     format_content_descriptions,
     get_category_color,
@@ -178,6 +181,8 @@ class FakeSession:
         self.closed = False
 
     def post(self, url, **kwargs):
+        if "data" in kwargs and "json" not in kwargs:
+            kwargs["json"] = json.loads(kwargs["data"].decode("utf-8"))
         self.calls.append((url, kwargs))
         outcome = next(self.outcomes)
         if isinstance(outcome, Exception):
@@ -480,6 +485,81 @@ def test_82279_long_body_builds_multiple_legal_lossless_payloads():
     for index in (0, 1, 249, 499):
         row = f"• 角色名稱：測試角色{index:04d}\n  制裁結果：永久鎖定"
         assert sum(row in description for description in descriptions) == 1
+
+
+def test_83949_cjk_payload_is_split_before_discord_request_is_too_large():
+    item = Announcement(
+        "83949",
+        "活動",
+        "【菇菇通行證 Season 2】",
+        "2026/10/15",
+        "https://maplestoryclassic-event.beanfun.com/EventAd/EventAd?eventAdId=20211",
+    )
+    first_image = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1792061602127.png"
+    second_image = "https://tw.hicdn.beanfun.com/beanfun/WebImage/1792061602076.png"
+    blocks = (
+        TextBlock("活動前言。" * 130),
+        ImageBlock(first_image),
+        TextBlock("菇菇通行證活動內容與獎勵說明。" * 225),
+        ImageBlock(second_image),
+        TextBlock("活動注意事項。" * 100),
+    )
+
+    payloads = build_announcement_payloads(item, blocks=blocks)
+
+    assert len(payloads) > 1
+    validate_announcement_payloads(item, payloads)
+    assert all(
+        _payload_json_size(payload) <= MAX_WEBHOOK_JSON_BYTES
+        for payload in payloads
+    )
+    assert reconstructed_payload_body(payloads) == _format_announcement_content(
+        "".join(block.text for block in blocks if isinstance(block, TextBlock))
+    )
+
+    flattened = [embed for payload in payloads for embed in payload["embeds"]]
+    image_urls = [
+        embed["image"]["url"] for embed in flattened if "image" in embed
+    ]
+    assert image_urls == [first_image, second_image]
+    assert all("footer" not in embed for embed in flattened[:-1])
+    assert flattened[-1]["footer"]["text"].endswith("公告 ID：83949")
+
+
+def test_preflight_rejects_webhook_json_body_over_safe_byte_budget():
+    payload = {
+        "username": "Maple Classic Bot",
+        "embeds": [
+            {
+                "title": "標題" * 128,
+                "description": "繁體中文" * 1000,
+                "footer": {"text": "附註" * 750},
+            }
+        ],
+        "allowed_mentions": {"parse": []},
+    }
+
+    assert sum(_embed_text_length(embed) for embed in payload["embeds"]) < 6000
+    assert _payload_json_size(payload) > MAX_WEBHOOK_JSON_BYTES
+    with pytest.raises(DiscordSendError, match="Webhook JSON 大小"):
+        validate_announcement_payloads(announcement(), [payload])
+
+
+def test_webhook_request_uses_compact_utf8_json_body():
+    session = FakeSession([FakeResponse(200)])
+
+    send_announcement(
+        WEBHOOK,
+        announcement(),
+        user_agent="test",
+        blocks=(TextBlock("繁體中文公告內容"),),
+        session=session,
+    )
+
+    request = session.calls[0][1]
+    assert "繁體中文公告內容".encode("utf-8") in request["data"]
+    assert b"\\u7e41" not in request["data"]
+    assert request["headers"]["Content-Type"] == "application/json; charset=utf-8"
 
 
 def test_82289_scale_body_builds_legal_lossless_payloads():
