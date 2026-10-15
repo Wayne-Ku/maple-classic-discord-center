@@ -10,9 +10,11 @@ from discord_sender import (
     MAX_DESCRIPTION_LENGTH,
     MAX_EMBED_FIELD_VALUE_LENGTH,
     MAX_MESSAGE_EMBED_TEXT_LENGTH,
+    MAX_MESSAGE_EMBEDS_JSON_BYTES,
     MAX_WEBHOOK_JSON_BYTES,
     _embed_text_length,
     _format_announcement_content,
+    _json_value_size,
     _payload_json_size,
     build_announcement_payloads,
     format_content_descriptions,
@@ -528,20 +530,30 @@ def test_83949_cjk_payload_is_split_before_discord_request_is_too_large():
 
 def test_preflight_rejects_webhook_json_body_over_safe_byte_budget():
     payload = {
-        "username": "Maple Classic Bot",
-        "embeds": [
-            {
-                "title": "標題" * 128,
-                "description": "繁體中文" * 1000,
-                "footer": {"text": "附註" * 750},
-            }
-        ],
+        "username": "M" * (MAX_WEBHOOK_JSON_BYTES + 1),
+        "embeds": [{"description": "正文"}],
         "allowed_mentions": {"parse": []},
     }
 
     assert sum(_embed_text_length(embed) for embed in payload["embeds"]) < 6000
     assert _payload_json_size(payload) > MAX_WEBHOOK_JSON_BYTES
     with pytest.raises(DiscordSendError, match="Webhook JSON 大小"):
+        validate_announcement_payloads(announcement(), [payload])
+
+
+def test_preflight_rejects_oversized_serialized_embeds_field():
+    payload = {
+        "username": "Maple Classic Bot",
+        "embeds": [
+            {"description": "繁體中文" * 800},
+            {"description": "後續內容" * 150},
+        ],
+        "allowed_mentions": {"parse": []},
+    }
+
+    assert sum(_embed_text_length(embed) for embed in payload["embeds"]) < 6000
+    assert _json_value_size(payload["embeds"]) > MAX_MESSAGE_EMBEDS_JSON_BYTES
+    with pytest.raises(DiscordSendError, match="message.embeds 大小"):
         validate_announcement_payloads(announcement(), [payload])
 
 

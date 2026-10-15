@@ -40,13 +40,17 @@ MAX_EMBED_FIELD_VALUE_LENGTH = 1024
 MAX_EMBED_FOOTER_LENGTH = 2048
 MAX_EMBED_AUTHOR_LENGTH = 256
 MAX_MESSAGE_EMBED_TEXT_LENGTH = 6000
+# Discord reports code 40005 once the serialized message.embeds field exceeds
+# its practical 10 KiB boundary, even when all documented character limits pass.
+MAX_MESSAGE_EMBEDS_JSON_BYTES = 10_000
 # Discord may reject a webhook body before its documented embed character limits
 # are reached. Keep the compact UTF-8 request body below a conservative byte budget;
 # this especially matters for CJK-heavy announcements with multiple embeds.
 MAX_WEBHOOK_JSON_BYTES = 16_000
 TARGET_DESCRIPTION_BODY_LENGTH = 3800
 TARGET_MESSAGE_BODY_TEXT_LENGTH = 5200
-TARGET_MESSAGE_BODY_JSON_BYTES = 13_000
+TARGET_TEXT_ENTRY_JSON_BYTES = 9_450
+TARGET_MESSAGE_BODY_JSON_BYTES = 7_000
 MAX_RAW_ENTRIES_PER_MESSAGE = 8
 MAX_EMBED_FIELDS = 25
 LOGGER = logging.getLogger("maple-classic-discord-center")
@@ -324,7 +328,7 @@ def _safe_split_point(value: str, limit: int) -> int:
 def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
     if (
         len(value) <= TARGET_DESCRIPTION_BODY_LENGTH
-        and _json_value_size(value) <= TARGET_MESSAGE_BODY_JSON_BYTES
+        and _json_value_size(value) <= TARGET_TEXT_ENTRY_JSON_BYTES
     ):
         return [value]
     if atomic:
@@ -336,7 +340,7 @@ def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
     remaining = value
     while (
         len(remaining) > TARGET_DESCRIPTION_BODY_LENGTH
-        or _json_value_size(remaining) > TARGET_MESSAGE_BODY_JSON_BYTES
+        or _json_value_size(remaining) > TARGET_TEXT_ENTRY_JSON_BYTES
     ):
         max_chars = min(len(remaining), TARGET_DESCRIPTION_BODY_LENGTH)
         low = 1
@@ -344,7 +348,7 @@ def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
         byte_safe_chars = 0
         while low <= high:
             middle = (low + high) // 2
-            if _json_value_size(remaining[:middle]) <= TARGET_MESSAGE_BODY_JSON_BYTES:
+            if _json_value_size(remaining[:middle]) <= TARGET_TEXT_ENTRY_JSON_BYTES:
                 byte_safe_chars = middle
                 low = middle + 1
             else:
@@ -372,7 +376,7 @@ def _formatted_text_entries(value: str) -> list[tuple[str, str]]:
             combined = current + piece
             if current and (
                 len(combined) > TARGET_DESCRIPTION_BODY_LENGTH
-                or _json_value_size(combined) > TARGET_MESSAGE_BODY_JSON_BYTES
+                or _json_value_size(combined) > TARGET_TEXT_ENTRY_JSON_BYTES
             ):
                 entries.append(("text", current))
                 current = ""
@@ -718,6 +722,17 @@ def validate_announcement_payloads(
                 reason=(
                     f"Embed 總文字長度={message_text_length}，"
                     f"上限={MAX_MESSAGE_EMBED_TEXT_LENGTH}"
+                ),
+            )
+        embeds_json_bytes = _json_value_size(embeds)
+        if embeds_json_bytes > MAX_MESSAGE_EMBEDS_JSON_BYTES:
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason=(
+                    f"message.embeds 大小={embeds_json_bytes} bytes，"
+                    f"安全上限={MAX_MESSAGE_EMBEDS_JSON_BYTES} bytes"
                 ),
             )
         payload_json_bytes = _payload_json_size(payload)
@@ -1259,15 +1274,17 @@ def send_announcement(
         for chunk_index, payload in enumerate(payloads, start=1):
             embeds = payload["embeds"]
             text_length = sum(_embed_text_length(embed) for embed in embeds)
+            embeds_json_bytes = _json_value_size(embeds)
             payload_json_bytes = _payload_json_size(payload)
             LOGGER.info(
                 "Sending Discord chunk: ID=%s chunk=%d/%d embeds=%d "
-                "text_length=%d json_bytes=%d",
+                "text_length=%d embeds_json_bytes=%d json_bytes=%d",
                 announcement.announcement_id,
                 chunk_index,
                 total_chunks,
                 len(embeds),
                 text_length,
+                embeds_json_bytes,
                 payload_json_bytes,
             )
             try:
