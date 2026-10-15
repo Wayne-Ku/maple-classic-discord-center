@@ -940,6 +940,65 @@ def test_82273_reward_table_keeps_rows_columns_and_following_text_in_dom_order()
     assert not session.get_calls
 
 
+def test_83949_complex_merged_reward_table_is_omitted_without_losing_surrounding_content(caplog):
+    content = """
+    <p>菇菇通行證 Season 2 活動說明</p>
+    <img src="/images/pass-intro.png">
+    <p>通行證獎勵：</p>
+    <table>
+      <tr>
+        <th rowspan="2">等級</th>
+        <th colspan="3">一般通行證</th>
+        <th colspan="3">高級通行證</th>
+      </tr>
+      <tr>
+        <th>道具名稱</th><th>數量</th><th>使用期限</th>
+        <th>道具名稱</th><th>數量</th><th>使用期限</th>
+      </tr>
+      <tr>
+        <td rowspan="2">10</td><td>神秘的秘密箱子</td><td>1</td><td>14天</td>
+        <td>黃金菇菇寵物組合包</td><td>1</td><td>7天</td>
+      </tr>
+      <tr>
+        <td>紅色藥水</td><td>50</td><td>永久</td>
+        <td>白色藥水</td><td>50</td><td>永久</td>
+      </tr>
+    </table>
+    <p>活動注意事項請參閱官方頁面。</p>
+    <img src="/images/pass-footer.png">
+    <p>《新楓之谷：經典版》營運團隊 敬上</p>
+    """
+    session = Session(
+        [Response({"code": 1, "data": {"myDataSet": {"table": {"content": content}}}})]
+    )
+
+    with caplog.at_level("INFO"):
+        detail = fetch_announcement_detail(
+            Announcement(
+                "83949",
+                "活動",
+                "【菇菇通行證 Season 2】",
+                "2026/10/15",
+                "https://maplestoryclassic.beanfun.com/bulletin?Bid=83949",
+            ),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert "菇菇通行證 Season 2 活動說明" in detail.plain_text
+    assert "通行證獎勵：" in detail.plain_text
+    assert "活動注意事項請參閱官方頁面。" in detail.plain_text
+    assert "《新楓之谷：經典版》營運團隊 敬上" in detail.plain_text
+    assert "神秘的秘密箱子" not in detail.plain_text
+    assert "黃金菇菇寵物組合包" not in detail.plain_text
+    assert detail.images == (
+        "https://maplestoryclassic.beanfun.com/images/pass-intro.png",
+        "https://maplestoryclassic.beanfun.com/images/pass-footer.png",
+    )
+    assert "Complex merged table omitted: rows=4 columns=7" in caplog.text
+
+
 def test_unknown_table_uses_generic_rows_and_keeps_links_clickable():
     html = """
     <p>表格前</p>

@@ -212,6 +212,41 @@ def _is_sanction_list_table(table: Tag) -> bool:
     )
 
 
+def _complex_table_shape(table: Tag) -> tuple[int, int] | None:
+    """Identify multi-axis merged tables that cannot be read reliably in Discord."""
+    rows = [
+        row for row in table.find_all("tr") if row.find_parent("table") is table
+    ]
+    cells = [_direct_table_cells(row) for row in rows]
+    has_rowspan = any(
+        int(str(cell.get("rowspan") or "1")) > 1
+        for row_cells in cells
+        for cell in row_cells
+        if str(cell.get("rowspan") or "1").isdigit()
+    )
+    has_colspan = any(
+        int(str(cell.get("colspan") or "1")) > 1
+        for row_cells in cells
+        for cell in row_cells
+        if str(cell.get("colspan") or "1").isdigit()
+    )
+    logical_columns = max(
+        (
+            sum(
+                int(str(cell.get("colspan") or "1"))
+                if str(cell.get("colspan") or "1").isdigit()
+                else 1
+                for cell in row_cells
+            )
+            for row_cells in cells
+        ),
+        default=0,
+    )
+    if has_rowspan and has_colspan and logical_columns >= 5:
+        return len(rows), logical_columns
+    return None
+
+
 def _format_table(table: Tag, render_cell: Callable[[Tag], str]) -> str:
     """Render table rows as searchable, mobile-friendly text without losing columns."""
     row_tags = [
@@ -352,6 +387,15 @@ def _detail_from_html(
         if not isinstance(node, Tag):
             return
         if node.name == "table":
+            complex_shape = _complex_table_shape(node)
+            if complex_shape is not None:
+                row_count, column_count = complex_shape
+                LOGGER.info(
+                    "Complex merged table omitted: rows=%d columns=%d",
+                    row_count,
+                    column_count,
+                )
+                return
             if omit_sanction_list and _is_sanction_list_table(node):
                 row_count = max(len(node.find_all("tr")) - 1, 0)
                 LOGGER.info("Sanction list table omitted: rows=%d", row_count)
