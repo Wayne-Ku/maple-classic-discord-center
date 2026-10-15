@@ -6,6 +6,7 @@ import logging
 import re
 import math
 import time
+import json
 from collections.abc import Callable, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -39,8 +40,13 @@ MAX_EMBED_FIELD_VALUE_LENGTH = 1024
 MAX_EMBED_FOOTER_LENGTH = 2048
 MAX_EMBED_AUTHOR_LENGTH = 256
 MAX_MESSAGE_EMBED_TEXT_LENGTH = 6000
+# Discord may reject a webhook body before its documented embed character limits
+# are reached. Keep the compact UTF-8 request body below a conservative byte budget;
+# this especially matters for CJK-heavy announcements with multiple embeds.
+MAX_WEBHOOK_JSON_BYTES = 16_000
 TARGET_DESCRIPTION_BODY_LENGTH = 3800
 TARGET_MESSAGE_BODY_TEXT_LENGTH = 5200
+TARGET_MESSAGE_BODY_JSON_BYTES = 13_000
 MAX_RAW_ENTRIES_PER_MESSAGE = 8
 MAX_EMBED_FIELDS = 25
 LOGGER = logging.getLogger("maple-classic-discord-center")
@@ -316,7 +322,10 @@ def _safe_split_point(value: str, limit: int) -> int:
 
 
 def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
-    if len(value) <= TARGET_DESCRIPTION_BODY_LENGTH:
+    if (
+        len(value) <= TARGET_DESCRIPTION_BODY_LENGTH
+        and _json_value_size(value) <= TARGET_MESSAGE_BODY_JSON_BYTES
+    ):
         return [value]
     if atomic:
         raise DiscordSendError(
@@ -325,8 +334,24 @@ def _split_text_unit(value: str, *, atomic: bool) -> list[str]:
 
     chunks: list[str] = []
     remaining = value
-    while len(remaining) > TARGET_DESCRIPTION_BODY_LENGTH:
-        point = _safe_split_point(remaining, TARGET_DESCRIPTION_BODY_LENGTH)
+    while (
+        len(remaining) > TARGET_DESCRIPTION_BODY_LENGTH
+        or _json_value_size(remaining) > TARGET_MESSAGE_BODY_JSON_BYTES
+    ):
+        max_chars = min(len(remaining), TARGET_DESCRIPTION_BODY_LENGTH)
+        low = 1
+        high = max_chars
+        byte_safe_chars = 0
+        while low <= high:
+            middle = (low + high) // 2
+            if _json_value_size(remaining[:middle]) <= TARGET_MESSAGE_BODY_JSON_BYTES:
+                byte_safe_chars = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if byte_safe_chars <= 0:
+            raise DiscordSendError("公告正文無法在 webhook JSON 安全大小內分段。")
+        point = _safe_split_point(remaining, byte_safe_chars)
         chunks.append(remaining[:point])
         remaining = remaining[point:]
     if remaining:
@@ -344,7 +369,11 @@ def _formatted_text_entries(value: str) -> list[tuple[str, str]]:
     for unit, atomic in _logical_text_units(formatted):
         pieces = _split_text_unit(unit, atomic=atomic)
         for piece in pieces:
-            if current and len(current) + len(piece) > TARGET_DESCRIPTION_BODY_LENGTH:
+            combined = current + piece
+            if current and (
+                len(combined) > TARGET_DESCRIPTION_BODY_LENGTH
+                or _json_value_size(combined) > TARGET_MESSAGE_BODY_JSON_BYTES
+            ):
                 entries.append(("text", current))
                 current = ""
             current += piece
@@ -386,8 +415,10 @@ def _partition_content_entries(
     pages: list[list[tuple[str, str]]] = []
     current: list[tuple[str, str]] = []
     current_text_length = 0
+    current_json_bytes = 0
     for kind, value in entries:
         added_text_length = len(value) if kind == "text" else 0
+        added_json_bytes = _json_value_size(value)
         exceeds_text_budget = (
             current
             and current_text_length + added_text_length
@@ -396,12 +427,19 @@ def _partition_content_entries(
         exceeds_embed_budget = (
             current and len(current) >= MAX_RAW_ENTRIES_PER_MESSAGE
         )
-        if exceeds_text_budget or exceeds_embed_budget:
+        exceeds_json_budget = (
+            current
+            and current_json_bytes + added_json_bytes
+            > TARGET_MESSAGE_BODY_JSON_BYTES
+        )
+        if exceeds_text_budget or exceeds_embed_budget or exceeds_json_budget:
             pages.append(current)
             current = []
             current_text_length = 0
+            current_json_bytes = 0
         current.append((kind, value))
         current_text_length += added_text_length
+        current_json_bytes += added_json_bytes
     if current:
         pages.append(current)
     return pages
@@ -460,6 +498,24 @@ def _embed_text_length(embed: dict[str, object]) -> int:
                 if isinstance(value, str):
                     total += len(value)
     return total
+
+
+def _json_value_size(value: object) -> int:
+    """Return the compact UTF-8 byte size used for the webhook request body."""
+    return len(_encode_json(value))
+
+
+def _encode_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _payload_json_size(payload: dict[str, object]) -> int:
+    return _json_value_size(payload)
 
 
 def _payload_limit_error(
@@ -662,6 +718,17 @@ def validate_announcement_payloads(
                 reason=(
                     f"Embed 總文字長度={message_text_length}，"
                     f"上限={MAX_MESSAGE_EMBED_TEXT_LENGTH}"
+                ),
+            )
+        payload_json_bytes = _payload_json_size(payload)
+        if payload_json_bytes > MAX_WEBHOOK_JSON_BYTES:
+            raise _payload_limit_error(
+                announcement,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                reason=(
+                    f"Webhook JSON 大小={payload_json_bytes} bytes，"
+                    f"安全上限={MAX_WEBHOOK_JSON_BYTES} bytes"
                 ),
             )
 
@@ -943,13 +1010,17 @@ def _send_payload(
     request_url = urlunsplit((
         parsed_url.scheme, parsed_url.netloc, parsed_url.path, urlencode(query), "",
     ))
+    encoded_payload = _encode_json(payload)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = client.post(
                 request_url,
                 params={"wait": "true"},
-                json=payload,
-                headers={"User-Agent": user_agent},
+                data=encoded_payload,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "User-Agent": user_agent,
+                },
                 timeout=timeout,
             )
             status_code = getattr(response, "status_code", None)
@@ -1188,13 +1259,16 @@ def send_announcement(
         for chunk_index, payload in enumerate(payloads, start=1):
             embeds = payload["embeds"]
             text_length = sum(_embed_text_length(embed) for embed in embeds)
+            payload_json_bytes = _payload_json_size(payload)
             LOGGER.info(
-                "Sending Discord chunk: ID=%s chunk=%d/%d embeds=%d text_length=%d",
+                "Sending Discord chunk: ID=%s chunk=%d/%d embeds=%d "
+                "text_length=%d json_bytes=%d",
                 announcement.announcement_id,
                 chunk_index,
                 total_chunks,
                 len(embeds),
                 text_length,
+                payload_json_bytes,
             )
             try:
                 message_id, channel_id = _send_payload(

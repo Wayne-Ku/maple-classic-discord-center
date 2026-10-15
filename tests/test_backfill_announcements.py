@@ -202,7 +202,12 @@ def test_backfill_and_normal_flow_build_the_same_ordered_embed_structure(monkeyp
 
     class PayloadSession:
         def post(self, _url, **kwargs):
-            payloads.append(kwargs["json"])
+            payload = kwargs.get("json")
+            if payload is None:
+                import json
+
+                payload = json.loads(kwargs["data"].decode("utf-8"))
+            payloads.append(payload)
             return SuccessfulResponse()
 
         def close(self):
