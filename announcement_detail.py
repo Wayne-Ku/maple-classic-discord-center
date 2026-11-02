@@ -68,7 +68,13 @@ _OFFICIAL_EXTERNAL_CONTENT_SELECTORS = {
         ("⚠️ 注意事項", ".notify-article"),
     ),
 }
-_GAMA_EVENT_HOST = "maplestory-gama-event.beanfun.com"
+_GAMA_SHORT_LINK_HOST = "gama.cc"
+_GAMA_EVENT_HOSTS = frozenset(
+    {
+        "maplestory-gama-event.beanfun.com",
+        "bfgame-gama-event.beanfun.com",
+    }
+)
 _GAMA_EVENT_PATH = "/index"
 
 
@@ -751,9 +757,14 @@ def _is_official_external_landing_page(url: str) -> bool:
     hostname = (parsed.hostname or "").casefold()
     return (
         parsed.scheme.casefold() == "https"
-        and hostname.endswith(".beanfun.com")
-        and hostname
-        not in {"maplestoryclassic.beanfun.com", "tw.beanfun.com"}
+        and (
+            hostname == _GAMA_SHORT_LINK_HOST
+            or (
+                hostname.endswith(".beanfun.com")
+                and hostname
+                not in {"maplestoryclassic.beanfun.com", "tw.beanfun.com"}
+            )
+        )
     )
 
 
@@ -773,7 +784,7 @@ def _gama_event_sequence(url: str) -> str | None:
     parsed = urlsplit(url)
     if (
         parsed.scheme.casefold() != "https"
-        or (parsed.hostname or "").casefold() != _GAMA_EVENT_HOST
+        or (parsed.hostname or "").casefold() not in _GAMA_EVENT_HOSTS
         or (parsed.path.rstrip("/").casefold() or "/") != _GAMA_EVENT_PATH
     ):
         return None
@@ -789,6 +800,63 @@ def _gama_event_sequence(url: str) -> str | None:
     )
     match = re.search(r"\.(\d+)$", token)
     return match.group(1) if match else None
+
+
+def _gama_short_link_destination(html: str, *, base_url: str) -> str | None:
+    """Resolve gama.cc only to an allowlisted event-builder destination."""
+    parsed_base = urlsplit(base_url)
+    if (
+        parsed_base.scheme.casefold() != "https"
+        or (parsed_base.hostname or "").casefold() != _GAMA_SHORT_LINK_HOST
+        or not isinstance(html, str)
+        or not html.strip()
+    ):
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    target = soup.select_one("#original-redirect-url-input[value]")
+    candidate = str(target.get("value") or "").strip() if target else ""
+    if not candidate or _gama_event_sequence(candidate) is None:
+        return None
+    return candidate
+
+
+def _gama_event_fragments(
+    components: list[Any],
+    *,
+    base_url: str,
+    include_background: bool = True,
+) -> list[str]:
+    """Keep supported content in source order, including nested GArea content."""
+    fragments: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        content = component.get("content")
+        if not isinstance(content, dict):
+            continue
+        component_name = component.get("component")
+        if component_name == "GBg" and include_background:
+            image_url = _absolute_http_url(
+                content.get("pc") or content.get("mobile"), base_url
+            )
+            if image_url:
+                fragments.append(f'<img src="{escape(image_url, quote=True)}">')
+        elif component_name == "GText":
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                fragments.append(text)
+
+        sub_content = content.get("subContent")
+        if component_name == "GArea" and isinstance(sub_content, list):
+            fragments.extend(
+                _gama_event_fragments(
+                    sub_content,
+                    base_url=base_url,
+                    include_background=False,
+                )
+            )
+    return fragments
 
 
 def _gama_event_landing_page_detail(
@@ -833,26 +901,7 @@ def _gama_event_landing_page_detail(
         if not isinstance(components, list):
             return None, "external-gama-event-invalid-components"
 
-        fragments: list[str] = []
-        for component in components:
-            if not isinstance(component, dict):
-                continue
-            content = component.get("content")
-            if not isinstance(content, dict):
-                continue
-            component_name = component.get("component")
-            if component_name == "GBg":
-                image_url = _absolute_http_url(
-                    content.get("pc") or content.get("mobile"), base_url
-                )
-                if image_url:
-                    fragments.append(
-                        f'<img src="{escape(image_url, quote=True)}">'
-                    )
-            elif component_name == "GText":
-                text = content.get("text")
-                if isinstance(text, str) and text.strip():
-                    fragments.append(text)
+        fragments = _gama_event_fragments(components, base_url=base_url)
 
         if not fragments:
             return None, "external-gama-event-empty"
@@ -1094,15 +1143,37 @@ def fetch_announcement_detail(announcement: Announcement, *, timeout: float, use
         response.raise_for_status()
         detail = None
         selector = "external-not-allowed"
-        if _is_official_external_landing_page(announcement.url):
-            detail, selector = _official_external_landing_page_detail(
+        external_url = announcement.url
+        if (urlsplit(announcement.url).hostname or "").casefold() == _GAMA_SHORT_LINK_HOST:
+            destination = _gama_short_link_destination(
                 response.text,
                 base_url=announcement.url,
             )
-        if not detail:
+            if destination:
+                LOGGER.info(
+                    "Official gama.cc destination: ID=%s host=%s",
+                    announcement.announcement_id,
+                    urlsplit(destination).hostname,
+                )
+                response = client.get(destination, headers=headers, timeout=timeout)
+                response.raise_for_status()
+                external_url = destination
+            else:
+                selector = "external-gama-short-link-invalid"
+        if _gama_event_sequence(external_url) is not None:
+            detail, selector = _official_external_landing_page_detail(
+                response.text,
+                base_url=external_url,
+            )
+        elif _is_official_external_landing_page(announcement.url):
+            detail, selector = _official_external_landing_page_detail(
+                response.text,
+                base_url=external_url,
+            )
+        if not detail and (urlsplit(announcement.url).hostname or "").casefold() != _GAMA_SHORT_LINK_HOST:
             detail, selector = _html_detail(
                 response.text,
-                base_url=announcement.url,
+                base_url=external_url,
                 announcement_title=announcement.title,
             )
         LOGGER.info("HTML selector=%s", selector)

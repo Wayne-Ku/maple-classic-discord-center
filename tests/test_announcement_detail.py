@@ -122,6 +122,79 @@ def gama_event_page(*, event_sequence=4503):
     )
 
 
+def gama_short_link_item():
+    return Announcement(
+        "84087",
+        "活動",
+        "【2026 橘子週年慶｜Gama Island 探險】",
+        "2026/11/02",
+        "https://gama.cc/r4ZDl",
+    )
+
+
+def gama_short_link_page(destination):
+    return (
+        "<!doctype html><html><head><title>Gama Island</title></head><body>"
+        '<input id="original-redirect-url-input" '
+        f'value="{destination}">'
+        "<p>短網址預覽頁不應成為公告正文</p>"
+        "</body></html>"
+    )
+
+
+def nested_gama_event_page(*, event_sequence=4511):
+    components = [
+        {"component": "GWatermark", "content": {"text": "浮水印"}},
+        {
+            "component": "GArea",
+            "content": {
+                "subContent": [
+                    {
+                        "component": "GBg",
+                        "content": {
+                            "pc": "https://example.com/background.jpg"
+                        },
+                    },
+                    {
+                        "component": "GText",
+                        "content": {
+                            "text": (
+                                "<p>2026 橘子週年慶 Gama Island 探險</p>"
+                                "<p>活動時間：11/1～11/30</p>"
+                                '<p><a href="https://example.com/event">'
+                                "前往活動頁</a></p>"
+                            )
+                        },
+                    },
+                    {
+                        "component": "GAccordion",
+                        "content": {
+                            "subContent": [
+                                {
+                                    "component": "GText",
+                                    "content": {"text": "互動欄位不應送出"},
+                                }
+                            ]
+                        },
+                    },
+                ]
+            },
+        },
+    ]
+    payload = {
+        "data": {
+            "eventSeq": event_sequence,
+            "detail": json.dumps(components, ensure_ascii=False),
+        },
+        "code": 1,
+    }
+    return (
+        "<!doctype html><html><body>"
+        f"<script>var json = {json.dumps(payload, ensure_ascii=False)};</script>"
+        "</body></html>"
+    )
+
+
 def legacy_item():
     return Announcement(
         "82242",
@@ -460,6 +533,94 @@ def test_gama_event_page_rejects_mismatched_event_sequence():
             user_agent="test",
             session=session,
         )
+
+
+def test_84087_resolves_allowlisted_short_link_and_parses_nested_gtext(caplog):
+    destination = (
+        "https://bfgame-gama-event.beanfun.com/"
+        "index?Url=A5CBD36A98078ABD1DF60FA86CBA3141.4511"
+    )
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "84087",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ],
+        [
+            Response(text=gama_short_link_page(destination)),
+            Response(text=nested_gama_event_page()),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        detail = fetch_announcement_detail(
+            gama_short_link_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert len(session.get_calls) == 2
+    assert session.get_calls[1][0][0] == destination
+    assert "2026 橘子週年慶 Gama Island 探險" in detail.plain_text
+    assert "活動時間：11/1～11/30" in detail.plain_text
+    assert (
+        "[前往活動頁](https://example.com/event)" in detail.plain_text
+    )
+    assert "短網址預覽頁" not in detail.plain_text
+    assert "互動欄位不應送出" not in detail.plain_text
+    assert "background.jpg" not in repr(detail)
+    assert "HTML selector=external:gama-event-json" in caplog.text
+
+
+def test_gama_short_link_rejects_non_allowlisted_destination():
+    session = Session(
+        [
+            Response(
+                {
+                    "code": 1,
+                    "data": {
+                        "myDataSet": {
+                            "table": {
+                                "bullentinId": "84087",
+                                "content": None,
+                            }
+                        }
+                    },
+                }
+            )
+        ],
+        [
+            Response(
+                text=gama_short_link_page(
+                    "https://malicious.example/index?Url=token.4511"
+                )
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ExternalAnnouncementWithoutBodyError,
+        match="Official external-link announcement has no supported inline content",
+    ):
+        fetch_announcement_detail(
+            gama_short_link_item(),
+            timeout=1,
+            user_agent="test",
+            session=session,
+        )
+
+    assert len(session.get_calls) == 1
 
 
 def test_82645_uses_official_event_ad_api_and_preserves_order(caplog):
