@@ -16,6 +16,16 @@ on:
         required: false
         type: boolean
         default: false
+      cleanup_announcement_id:
+        description: "Delete obsolete webhook copies for this announcement ID"
+        required: false
+        type: string
+        default: ""
+      keep_message_id:
+        description: "Discord message ID to keep during cleanup"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -69,7 +79,17 @@ jobs:
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
           STATE_FILE: data/state.json
           REQUIRE_EXISTING_STATE: ${{ github.event_name == 'workflow_dispatch' && inputs.initialize_state && 'false' || 'true' }}
-        run: python app.py
+          CLEANUP_ANNOUNCEMENT_ID: ${{ inputs.cleanup_announcement_id || '' }}
+          KEEP_MESSAGE_ID: ${{ inputs.keep_message_id || '' }}
+        shell: bash
+        run: |
+          if [[ -n "$CLEANUP_ANNOUNCEMENT_ID" ]]; then
+            python tools/cleanup_discord_announcement.py \
+              --id "$CLEANUP_ANNOUNCEMENT_ID" \
+              --keep-message-id "$KEEP_MESSAGE_ID"
+          else
+            python app.py
+          fi
 
       - name: Detect state changes
         id: state_after
