@@ -150,8 +150,15 @@ def _format_announcement_content(content: str) -> str:
             match = matches[0]
             prefix = stripped_line[: match.start()].rstrip()
             suffix = stripped_line[match.end() :].strip()
-            icon = _link_icon(match.group("label"), match.group("href"))
-            link_line = f"{icon} {match.group('link')}" if icon else match.group("link")
+            label = match.group("label")
+            href = match.group("href")
+            if label.rstrip("/") == href.rstrip("/"):
+                label = "傳送門"
+                link = f"[{label}]({href})"
+            else:
+                link = match.group("link")
+            icon = _link_icon(label, href)
+            link_line = f"{icon} {link}" if icon else link
             if prefix:
                 if re.search(r"FAQ\s*:$", prefix):
                     prefix = re.sub(r"\s*:\s*$", "：", prefix)

@@ -1154,6 +1154,26 @@ def test_non_portal_markdown_link_does_not_gain_maple_emoji():
     result = _format_announcement_content("一般說明\n[官方網站](https://example.com)")
 
     assert "[官方網站](https://example.com)" in result
+
+
+def test_raw_url_markdown_label_becomes_clickable_portal_link():
+    support_url = "https://games.crm.gamania.com/hc/zh-tw/requests/new"
+    faq_url = "https://support-games.crm.gamania.com/hc/zh-tw"
+    result = _format_announcement_content(
+        "客服：\n"
+        f"[{support_url}]({support_url})\n"
+        "FAQ：\n"
+        f"[{faq_url}]({faq_url})"
+    )
+
+    assert result == (
+        "客服：\n\n"
+        f"🔗 [傳送門]({support_url})\n"
+        "FAQ：\n\n"
+        f"🔗 [傳送門]({faq_url})"
+    )
+    assert f"[{support_url}]({support_url})" not in result
+    assert f"[{faq_url}]({faq_url})" not in result
     assert "🍁 [官方網站]" not in result
 
 
