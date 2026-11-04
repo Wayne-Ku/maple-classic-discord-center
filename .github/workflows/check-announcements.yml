@@ -2,9 +2,6 @@ name: Check Maple Classic announcements
 run-name: ${{ inputs.slot_id && format('公告時段 {0}-{1}', inputs.slot_id, inputs.attempt) || 'Check Maple Classic announcements' }}
 
 on:
-  schedule:
-    # Keep the 15-minute cadence off common quarter-hour load peaks.
-    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       slot_id:

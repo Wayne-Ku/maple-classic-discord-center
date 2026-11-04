@@ -113,7 +113,7 @@ python -m pytest
 
 ## GitHub Actions
 
-Workflow 每 15 分鐘執行一次，也支援手動執行。狀態檔透過 GitHub Actions Cache 跨執行保存，不會 commit 回 repository。
+Cloudflare 每 15 分鐘派送 Workflow，並每 5 分鐘確認執行結果，失敗時最多派送三次，也支援手動執行。狀態檔透過 GitHub Actions Cache 跨執行保存，不會 commit 回 repository。
 
 排程要求既有狀態檔，Cache 遺失時會停止，避免默默重建基準而漏送。首次部署可手動勾選 `initialize_state` 建立基準；已有狀態不會被覆蓋。若不是首次部署，應先恢復狀態備份；重新初始化代表跳過目前尚未送出的公告。本機預設仍可首次初始化，長期運作可設定 `REQUIRE_EXISTING_STATE=true`。狀態維持 version 2，保留訊息 ID 與待刪除紀錄，並繼續相容 version 1。
 
@@ -138,7 +138,7 @@ Workflow 從 `${{ secrets.DISCORD_WEBHOOK_URL }}` 讀取 Webhook，並從 `${{ s
 4. 首次部署須勾選 `initialize_state`；可同時勾選 `test_mode`，送出最新一篇測試公告。已有狀態時不需重新初始化。
 5. 確認成功後，再以未勾選的正常模式執行一次。
 
-注意：GitHub 排程使用 UTC 表示，目前於每小時第 7、22、37、52 分鐘執行，維持 15 分鐘間隔並避開整刻尖峰。GitHub 排程可能因平台負載延遲。
+觸發器為 Cloudflare Worker yutian-announcement-scheduler，時段為每小時 00、15、30、45 分。GitHub 保留 workflow_dispatch 執行入口。每筆工作名稱含「公告時段」與時段識別碼，可對照 Cloudflare D1 執行紀錄。GitHub runner 排隊及網路仍可能造成延遲。
 
 ## 常見錯誤排除
 
