@@ -42,14 +42,14 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
           cache: pip
@@ -59,7 +59,7 @@ jobs:
 
       - name: Restore announcement state
         id: state_restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6.1.0
         with:
           path: data/state.json
           key: maple-state-${{ github.ref_name }}-restore
@@ -117,7 +117,7 @@ jobs:
 
       - name: Save announcement state
         if: always() && steps.state_after.outputs.changed == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6.1.0
         with:
           path: data/state.json
           key: maple-state-${{ github.ref_name }}-${{ steps.state_after.outputs.sha256 }}
