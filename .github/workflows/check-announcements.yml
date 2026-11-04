@@ -1,4 +1,5 @@
 name: Check Maple Classic announcements
+run-name: ${{ inputs.slot_id && format('公告時段 {0}-{1}', inputs.slot_id, inputs.attempt) || 'Check Maple Classic announcements' }}
 
 on:
   schedule:
@@ -6,6 +7,14 @@ on:
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
+      slot_id:
+        description: "Cloudflare scheduler slot"
+        required: false
+        type: string
+      attempt:
+        description: "Cloudflare dispatch attempt"
+        required: false
+        type: string
       test_mode:
         description: "Send the latest announcement as a webhook test"
         required: false
