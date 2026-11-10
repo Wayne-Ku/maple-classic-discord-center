@@ -45,20 +45,41 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Decide announcement cadence
+        id: cadence
+        shell: bash
+        env:
+          SLOT_ID: ${{ inputs.slot_id || '' }}
+        run: |
+          if [[ -z "$SLOT_ID" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch: running announcement check."
+          elif [[ "$SLOT_ID" =~ ^[0-9]+$ ]] && (( (SLOT_ID / 60000) % 60 == 0 )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Hourly Cloudflare slot: running announcement check."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Non-hourly Cloudflare slot: skipping announcement check."
+          fi
+
       - name: Check out repository
+        if: steps.cadence.outputs.run == 'true'
         uses: actions/checkout@v7.0.1
 
       - name: Set up Python
+        if: steps.cadence.outputs.run == 'true'
         uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
+        if: steps.cadence.outputs.run == 'true'
         run: python -m pip install -r requirements.txt
 
       - name: Restore announcement state
         id: state_restore
+        if: steps.cadence.outputs.run == 'true'
         uses: actions/cache/restore@v6.1.0
         with:
           path: data/state.json
@@ -68,6 +89,7 @@ jobs:
 
       - name: Record state before check
         id: state_before
+        if: steps.cadence.outputs.run == 'true'
         shell: bash
         run: |
           if [[ -f data/state.json ]]; then
@@ -79,6 +101,7 @@ jobs:
           fi
 
       - name: Check and send announcements
+        if: steps.cadence.outputs.run == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
@@ -99,7 +122,7 @@ jobs:
 
       - name: Detect state changes
         id: state_after
-        if: always()
+        if: always() && steps.cadence.outputs.run == 'true'
         shell: bash
         run: |
           if [[ -f data/state.json ]]; then
@@ -116,7 +139,7 @@ jobs:
           fi
 
       - name: Save announcement state
-        if: always() && steps.state_after.outputs.changed == 'true'
+        if: always() && steps.cadence.outputs.run == 'true' && steps.state_after.outputs.changed == 'true'
         uses: actions/cache/save@v6.1.0
         with:
           path: data/state.json

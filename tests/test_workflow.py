@@ -13,13 +13,29 @@ def test_cloudflare_dispatch_replaces_github_schedule():
     assert "format('公告時段 {0}-{1}', inputs.slot_id, inputs.attempt)" in text
 
 
+def test_cloudflare_dispatch_only_runs_hour_aligned_slots():
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "- name: Decide announcement cadence" in text
+    assert '(( (SLOT_ID / 60000) % 60 == 0 ))' in text
+    assert 'if [[ -z "$SLOT_ID" ]]' in text
+    assert 'echo "run=true" >> "$GITHUB_OUTPUT"' in text
+    assert 'echo "run=false" >> "$GITHUB_OUTPUT"' in text
+    assert text.count("if: steps.cadence.outputs.run == 'true'") == 6
+
+
 def test_partial_success_state_is_saved_even_when_a_later_announcement_fails():
     text = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "- name: Detect state changes\n        id: state_after\n        if: always()" in text
+    assert (
+        "- name: Detect state changes\n"
+        "        id: state_after\n"
+        "        if: always() && steps.cadence.outputs.run == 'true'"
+    ) in text
     assert (
         "- name: Save announcement state\n"
-        "        if: always() && steps.state_after.outputs.changed == 'true'"
+        "        if: always() && steps.cadence.outputs.run == 'true' && "
+        "steps.state_after.outputs.changed == 'true'"
     ) in text
 
 
