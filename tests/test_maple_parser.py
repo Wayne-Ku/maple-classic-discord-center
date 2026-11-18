@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 import requests
 
@@ -163,6 +165,51 @@ def test_retryable_failure_stops_after_max_attempts():
     assert sleeps == [1.0, 2.0]
 
 
+def test_http_200_invalid_json_is_retried_then_succeeds(caplog):
+    session = FakeSession(
+        [
+            FakeResponse(ValueError("temporary html response"), status_code=200),
+            FakeResponse(payload([row("1")]), status_code=200),
+        ]
+    )
+    sleeps = []
+
+    with caplog.at_level(logging.INFO):
+        items = fetch_announcements(
+            user_agent="test",
+            session=session,
+            sleep=sleeps.append,
+        )
+
+    assert [item.announcement_id for item in items] == ["1"]
+    assert len(session.calls) == 2
+    assert sleeps == [1.0]
+    assert "暫時未回傳有效 JSON" in caplog.text
+
+
+def test_http_200_invalid_json_becomes_no_announcements_without_warning(caplog):
+    session = FakeSession(
+        [
+            FakeResponse(ValueError("temporary html response"), status_code=200)
+            for _ in range(MAX_ATTEMPTS)
+        ]
+    )
+    sleeps = []
+
+    with caplog.at_level(logging.INFO):
+        items = fetch_announcements(
+            user_agent="test",
+            session=session,
+            sleep=sleeps.append,
+        )
+
+    assert items == []
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0]
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert "視為目前沒有可用公告資料" in caplog.text
+
+
 def test_non_retryable_400_fails_without_retry():
     session = FakeSession(
         [
@@ -216,14 +263,14 @@ def test_parse_rejects_invalid_or_excessive_total_pages(total_page):
         parse_api_response(payload([], total_page=total_page))
 
 
-def test_fetch_rejects_empty_all_pages():
-    with pytest.raises(MapleParserError):
-        fetch_announcements(user_agent="test", session=FakeSession([FakeResponse(payload([]))]))
+def test_fetch_accepts_empty_all_pages_as_no_announcements():
+    assert fetch_announcements(
+        user_agent="test",
+        session=FakeSession([FakeResponse(payload([]))]),
+    ) == []
 
 
-def test_fetch_wraps_invalid_json_and_http_errors():
-    with pytest.raises(MapleParserError):
-        fetch_announcements(user_agent="test", session=FakeSession([FakeResponse(ValueError("bad json"))]))
+def test_fetch_wraps_http_errors():
     with pytest.raises(MapleParserError):
         fetch_announcements(
             user_agent="test",

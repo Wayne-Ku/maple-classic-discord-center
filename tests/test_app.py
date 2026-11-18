@@ -54,6 +54,27 @@ def test_first_normal_run_only_creates_baseline(monkeypatch, tmp_path):
     assert load_sent_ids(path) == {"2"}
 
 
+def test_empty_official_response_is_noop_without_touching_state(
+    monkeypatch, tmp_path, caplog
+):
+    path = tmp_path / "state.json"
+    original_state = '{"version": 1, "sent_announcement_ids": ["1"]}'
+    path.write_text(original_state, encoding="utf-8")
+    monkeypatch.setattr(app, "fetch_announcements", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        app,
+        "send_announcement",
+        lambda *_args, **_kwargs: pytest.fail("must not send"),
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert app.run(make_config(path)) == 0
+
+    assert path.read_text(encoding="utf-8") == original_state
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert "等待下次檢查" in caplog.text
+
+
 def test_failed_send_is_not_recorded(monkeypatch, tmp_path):
     path = tmp_path / "state.json"
     path.write_text('{"version": 1, "sent_announcement_ids": ["1"]}', encoding="utf-8")

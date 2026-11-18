@@ -111,14 +111,14 @@ def _retry_delay(response: object, attempt: int) -> float:
     return float(2 ** (attempt - 1))
 
 
-def _fetch_page_response(
+def _fetch_page_payload(
     client: requests.Session,
     *,
     page: int,
     headers: dict[str, str],
     timeout: float,
     sleep: Callable[[float], None],
-) -> requests.Response:
+) -> Any | None:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = client.post(
             ANNOUNCEMENT_API_URL,
@@ -144,7 +144,26 @@ def _fetch_page_response(
             sleep(delay)
             continue
         response.raise_for_status()
-        return response
+        try:
+            payload = response.json()
+        except ValueError:
+            if attempt < MAX_ATTEMPTS:
+                delay = _retry_delay(response, attempt)
+                LOGGER.info(
+                    "官網公告 API 暫時未回傳有效 JSON，將重試："
+                    "page=%d attempt=%d/%d retry_in=%.1fs",
+                    page,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    delay,
+                )
+                sleep(delay)
+                continue
+            LOGGER.info(
+                "官網公告 API 本次未回傳有效 JSON，視為目前沒有可用公告資料。"
+            )
+            return None
+        return payload
     raise AssertionError("announcement API retry loop ended unexpectedly")
 
 
@@ -171,17 +190,15 @@ def fetch_announcements(
 
     try:
         while page <= total_pages:
-            response = _fetch_page_response(
+            payload = _fetch_page_payload(
                 client,
                 page=page,
                 headers=headers,
                 timeout=timeout,
                 sleep=sleep,
             )
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise MapleParserError("官網 API 未回傳有效 JSON。") from exc
+            if payload is None:
+                return []
             page_items, total_pages = parse_api_response(payload)
             all_items.extend(page_items)
             page += 1
@@ -190,9 +207,6 @@ def fetch_announcements(
     finally:
         if owns_session:
             client.close()
-
-    if not all_items:
-        raise MapleParserError("官網 API 未回傳任何公告，為避免誤判，狀態不會更新。")
 
     # Preserve API order and guard against duplicated rows across pages.
     seen: set[str] = set()
