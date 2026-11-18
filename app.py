@@ -145,6 +145,9 @@ def run(config: Config) -> int:
     announcements = fetch_announcements(
         timeout=config.request_timeout, user_agent=config.user_agent
     )
+    if not announcements:
+        LOGGER.info("官網目前沒有可用公告資料，本次略過並等待下次檢查。")
+        return 0
     current_ids = {item.announcement_id for item in announcements}
     state = load_state(config.state_file)
 

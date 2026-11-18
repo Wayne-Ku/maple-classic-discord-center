@@ -118,7 +118,7 @@ def _fetch_page_payload(
     headers: dict[str, str],
     timeout: float,
     sleep: Callable[[float], None],
-) -> Any:
+) -> Any | None:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = client.post(
             ANNOUNCEMENT_API_URL,
@@ -146,10 +146,10 @@ def _fetch_page_payload(
         response.raise_for_status()
         try:
             payload = response.json()
-        except ValueError as exc:
+        except ValueError:
             if attempt < MAX_ATTEMPTS:
                 delay = _retry_delay(response, attempt)
-                LOGGER.warning(
+                LOGGER.info(
                     "官網公告 API 暫時未回傳有效 JSON，將重試："
                     "page=%d attempt=%d/%d retry_in=%.1fs",
                     page,
@@ -159,7 +159,10 @@ def _fetch_page_payload(
                 )
                 sleep(delay)
                 continue
-            raise MapleParserError("官網 API 未回傳有效 JSON。") from exc
+            LOGGER.info(
+                "官網公告 API 本次未回傳有效 JSON，視為目前沒有可用公告資料。"
+            )
+            return None
         return payload
     raise AssertionError("announcement API retry loop ended unexpectedly")
 
@@ -194,6 +197,8 @@ def fetch_announcements(
                 timeout=timeout,
                 sleep=sleep,
             )
+            if payload is None:
+                return []
             page_items, total_pages = parse_api_response(payload)
             all_items.extend(page_items)
             page += 1
@@ -202,9 +207,6 @@ def fetch_announcements(
     finally:
         if owns_session:
             client.close()
-
-    if not all_items:
-        raise MapleParserError("官網 API 未回傳任何公告，為避免誤判，狀態不會更新。")
 
     # Preserve API order and guard against duplicated rows across pages.
     seen: set[str] = set()
