@@ -163,6 +163,47 @@ def test_retryable_failure_stops_after_max_attempts():
     assert sleeps == [1.0, 2.0]
 
 
+def test_http_200_invalid_json_is_retried_then_succeeds(caplog):
+    session = FakeSession(
+        [
+            FakeResponse(ValueError("temporary html response"), status_code=200),
+            FakeResponse(payload([row("1")]), status_code=200),
+        ]
+    )
+    sleeps = []
+
+    items = fetch_announcements(
+        user_agent="test",
+        session=session,
+        sleep=sleeps.append,
+    )
+
+    assert [item.announcement_id for item in items] == ["1"]
+    assert len(session.calls) == 2
+    assert sleeps == [1.0]
+    assert "暫時未回傳有效 JSON" in caplog.text
+
+
+def test_http_200_invalid_json_stops_after_max_attempts():
+    session = FakeSession(
+        [
+            FakeResponse(ValueError("temporary html response"), status_code=200)
+            for _ in range(MAX_ATTEMPTS)
+        ]
+    )
+    sleeps = []
+
+    with pytest.raises(MapleParserError, match="未回傳有效 JSON"):
+        fetch_announcements(
+            user_agent="test",
+            session=session,
+            sleep=sleeps.append,
+        )
+
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0]
+
+
 def test_non_retryable_400_fails_without_retry():
     session = FakeSession(
         [
@@ -223,7 +264,13 @@ def test_fetch_rejects_empty_all_pages():
 
 def test_fetch_wraps_invalid_json_and_http_errors():
     with pytest.raises(MapleParserError):
-        fetch_announcements(user_agent="test", session=FakeSession([FakeResponse(ValueError("bad json"))]))
+        fetch_announcements(
+            user_agent="test",
+            session=FakeSession(
+                [FakeResponse(ValueError("bad json")) for _ in range(MAX_ATTEMPTS)]
+            ),
+            sleep=lambda _delay: None,
+        )
     with pytest.raises(MapleParserError):
         fetch_announcements(
             user_agent="test",

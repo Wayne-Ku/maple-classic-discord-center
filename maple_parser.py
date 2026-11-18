@@ -111,14 +111,14 @@ def _retry_delay(response: object, attempt: int) -> float:
     return float(2 ** (attempt - 1))
 
 
-def _fetch_page_response(
+def _fetch_page_payload(
     client: requests.Session,
     *,
     page: int,
     headers: dict[str, str],
     timeout: float,
     sleep: Callable[[float], None],
-) -> requests.Response:
+) -> Any:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = client.post(
             ANNOUNCEMENT_API_URL,
@@ -144,7 +144,23 @@ def _fetch_page_response(
             sleep(delay)
             continue
         response.raise_for_status()
-        return response
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            if attempt < MAX_ATTEMPTS:
+                delay = _retry_delay(response, attempt)
+                LOGGER.warning(
+                    "官網公告 API 暫時未回傳有效 JSON，將重試："
+                    "page=%d attempt=%d/%d retry_in=%.1fs",
+                    page,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    delay,
+                )
+                sleep(delay)
+                continue
+            raise MapleParserError("官網 API 未回傳有效 JSON。") from exc
+        return payload
     raise AssertionError("announcement API retry loop ended unexpectedly")
 
 
@@ -171,17 +187,13 @@ def fetch_announcements(
 
     try:
         while page <= total_pages:
-            response = _fetch_page_response(
+            payload = _fetch_page_payload(
                 client,
                 page=page,
                 headers=headers,
                 timeout=timeout,
                 sleep=sleep,
             )
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise MapleParserError("官網 API 未回傳有效 JSON。") from exc
             page_items, total_pages = parse_api_response(payload)
             all_items.extend(page_items)
             page += 1
